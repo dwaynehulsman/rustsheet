@@ -50,11 +50,17 @@ pub struct Document {
     /// Id of the state the document is in; 0 is the state it was opened in.
     state_id: u64,
     saved_id: u64,
+    /// Bumped by every change, undo and redo; lets views cache derived data.
+    revision: u64,
 }
 
 impl Document {
     pub fn new(sheet: Sheet) -> Self {
         Self { sheet, next_id: 1, ..Self::default() }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn is_modified(&self) -> bool {
@@ -74,6 +80,7 @@ impl Document {
     }
 
     fn apply_raw(&mut self, change: Change) -> Change {
+        self.revision += 1;
         match change {
             Change::Cells(cells) => Change::Cells(self.sheet.set_states(cells)),
             Change::ColWidths(widths) => Change::ColWidths(

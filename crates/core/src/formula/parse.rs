@@ -247,11 +247,39 @@ pub fn parse_formula(text: &str) -> Result<Expr, ParseError> {
         return p.err("lege formule");
     }
     let expr = p.expr(0)?;
+    // The recursion guard in `expr` bounds the parser itself; postfix `%`
+    // nests without recursing, so check the depth of the finished tree too.
+    // Evaluation and printing recurse over it.
+    if tree_depth(&expr) > MAX_DEPTH {
+        return Err(ParseError { message: "formule is te diep genest".into(), pos: 0 });
+    }
     match p.peek() {
         Tok::Eof => Ok(expr),
         Tok::RParen => p.err("haakje sluiten zonder openen"),
         _ => p.err("onverwachte invoer na formule"),
     }
+}
+
+/// Nesting depth of an expression, computed without recursion. A flat
+/// operator chain counts as one level.
+fn tree_depth(expr: &Expr) -> usize {
+    let mut max = 0;
+    let mut stack = vec![(expr, 1usize)];
+    while let Some((e, depth)) = stack.pop() {
+        max = max.max(depth);
+        match e {
+            Expr::Unary(_, inner) | Expr::Percent(inner) | Expr::Paren(inner) => {
+                stack.push((inner, depth + 1))
+            }
+            Expr::Binary(first, rest) => {
+                stack.push((first, depth + 1));
+                stack.extend(rest.iter().map(|(_, e)| (e, depth + 1)));
+            }
+            Expr::Call(_, args) => stack.extend(args.iter().map(|a| (a, depth + 1))),
+            _ => {}
+        }
+    }
+    max
 }
 
 struct Parser {
@@ -313,7 +341,6 @@ impl Parser {
         let mut lhs = self.prefix()?;
         // Operators of this level accumulate into one flat chain.
         let mut chain: Vec<(BinOp, Expr)> = Vec::new();
-        let mut percents = 0;
         let close = |lhs: Expr, chain: &mut Vec<(BinOp, Expr)>| {
             if chain.is_empty() { lhs } else { Expr::Binary(Box::new(lhs), std::mem::take(chain)) }
         };
@@ -324,12 +351,6 @@ impl Parser {
                         break;
                     }
                     self.next();
-                    // Postfix % nests without recursing here, so count it
-                    // against the same depth budget.
-                    percents += 1;
-                    if self.depth + percents > MAX_DEPTH {
-                        return self.err("formule is te diep genest");
-                    }
                     lhs = Expr::Percent(Box::new(close(lhs, &mut chain)));
                 }
                 Tok::Op(op) => {
@@ -590,6 +611,12 @@ mod tests {
         assert!(parse_formula(&format!("={}1", "-".repeat(10_000))).is_err());
         assert!(parse_formula(&format!("=1{}", "%".repeat(8_000))).is_err());
         assert!(parse_formula("=50%%").is_ok());
+        // Percent signs spread over many nesting levels add up.
+        let nested = "(".repeat(100) + "1" + &")%".repeat(100);
+        assert!(parse_formula(&format!("={nested}")).is_err());
+        let spread: String = (0..60).fold("1".to_string(), |acc, _| format!("({acc}{})", "%".repeat(60)));
+        assert!(parse_formula(&format!("={spread}")).is_err());
+        assert!(tree_depth(&parse_formula("=SUM(1,(2+3)%)").unwrap()) == 5);
         assert!(parse_formula(&format!("=SUM({}", "SUM(".repeat(5_000))).is_err());
         assert!(parse_formula(&format!("={}", "1+".repeat(5_000))).is_err());
         assert!(parse_formula(&format!("={}", "(1)+".repeat(100) + "1")).is_ok());
