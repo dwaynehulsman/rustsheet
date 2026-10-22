@@ -146,10 +146,10 @@ pub fn sheet_to_pdf(sheet: &Sheet, range: Option<Range>) -> Vec<u8> {
             let footer = format!("Pagina {} van {count}", i + 1);
             let x = (pw - text_width(&footer, false, 8.0)) / 2.0;
             let _ =
-                write!(s, "BT /F1 8 Tf 0.4 g {x:.2} {:.2} Td {} Tj ET\n", MARGIN / 2.0, pdf_string(&footer));
-            let _ = write!(
+                writeln!(s, "BT /F1 8 Tf 0.4 g {x:.2} {:.2} Td {} Tj ET", MARGIN / 2.0, pdf_string(&footer));
+            let _ = writeln!(
                 s,
-                "BT /F2 9 Tf 0.2 g {MARGIN:.2} {:.2} Td {} Tj ET\n",
+                "BT /F2 9 Tf 0.2 g {MARGIN:.2} {:.2} Td {} Tj ET",
                 ph - MARGIN / 2.0 - 6.0,
                 pdf_string(sheet.name())
             );
@@ -184,18 +184,18 @@ fn page_content(sheet: &Sheet, cols: &[(u32, f64)], rows: &[(u32, f64)], _pw: f6
             if let Some(fill) = sheet.cell(CellRef::new(row, col)).and_then(|c| c.format.fill) {
                 let (r, g, b) = rgb(fill);
                 let _ =
-                    write!(s, "{r:.3} {g:.3} {b:.3} rg {:.2} {:.2} {w:.2} {h:.2} re f\n", xs[ci], ys[ri] - h);
+                    writeln!(s, "{r:.3} {g:.3} {b:.3} rg {:.2} {:.2} {w:.2} {h:.2} re f", xs[ci], ys[ri] - h);
             }
         }
     }
 
     // Gridlines.
-    let _ = write!(s, "0.82 G 0.4 w\n");
+    let _ = writeln!(s, "0.82 G 0.4 w");
     for &yy in ys.iter().chain(std::iter::once(&bottom)) {
-        let _ = write!(s, "{left:.2} {yy:.2} m {right:.2} {yy:.2} l S\n");
+        let _ = writeln!(s, "{left:.2} {yy:.2} m {right:.2} {yy:.2} l S");
     }
     for &xx in xs.iter().chain(std::iter::once(&right)) {
-        let _ = write!(s, "{xx:.2} {top:.2} m {xx:.2} {bottom:.2} l S\n");
+        let _ = writeln!(s, "{xx:.2} {top:.2} m {xx:.2} {bottom:.2} l S");
     }
 
     // Text.
@@ -235,9 +235,9 @@ fn page_content(sheet: &Sheet, cols: &[(u32, f64)], rows: &[(u32, f64)], _pw: f6
             }
             if clip_w > w {
                 // Hide the gridlines the text runs over, as on screen.
-                let _ = write!(
+                let _ = writeln!(
                     s,
-                    "1 g {:.2} {:.2} {:.2} {:.2} re f\n",
+                    "1 g {:.2} {:.2} {:.2} {:.2} re f",
                     xs[ci] + w - 0.3,
                     ys[ri] - h + 0.3,
                     clip_w - w,
@@ -252,9 +252,9 @@ fn page_content(sheet: &Sheet, cols: &[(u32, f64)], rows: &[(u32, f64)], _pw: f6
                 (true, true) => "F4",
             };
             let (r, g, b) = f.color.map_or((0.0, 0.0, 0.0), rgb);
-            let _ = write!(
+            let _ = writeln!(
                 s,
-                "q {:.2} {:.2} {clip_w:.2} {h:.2} re W n BT /{font} {FONT_SIZE} Tf {r:.3} {g:.3} {b:.3} rg {tx:.2} {ty:.2} Td {} Tj ET Q\n",
+                "q {:.2} {:.2} {clip_w:.2} {h:.2} re W n BT /{font} {FONT_SIZE} Tf {r:.3} {g:.3} {b:.3} rg {tx:.2} {ty:.2} Td {} Tj ET Q",
                 xs[ci],
                 ys[ri] - h,
                 pdf_string(&text)
@@ -307,10 +307,10 @@ fn assemble(streams: &[String], pw: f64, ph: f64) -> Vec<u8> {
     let xref = out.len();
     let mut table = format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1);
     for off in &offsets {
-        let _ = write!(table, "{off:010} 00000 n \n");
+        let _ = writeln!(table, "{off:010} 00000 n ");
     }
     let _ =
-        write!(table, "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1);
+        writeln!(table, "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF", offsets.len() + 1);
     out.extend_from_slice(table.as_bytes());
     out
 }
