@@ -551,6 +551,9 @@ impl SheetView {
             entry(ui, format!("Verwijder {}", plural(del_rows, "rij", "rijen")), Command::DeleteRows);
             entry(ui, format!("Verwijder {}", plural(del_cols, "kolom", "kolommen")), Command::DeleteCols);
             ui.separator();
+            entry(ui, "Sorteer oplopend".into(), Command::SortAsc);
+            entry(ui, "Sorteer aflopend".into(), Command::SortDesc);
+            ui.separator();
             entry(ui, "Wis inhoud".into(), Command::Delete);
         });
         if let Some(command) = chosen {

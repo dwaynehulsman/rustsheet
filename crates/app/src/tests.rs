@@ -581,3 +581,41 @@ fn italic_and_colours_from_the_toolbar() {
     h.run();
     assert_eq!(h.state().view.sheet().format(c("A1")).fill, None);
 }
+
+#[test]
+fn sorting_the_block_around_the_active_cell() {
+    let mut h = harness();
+    for row in [["Naam", "Score"], ["Piet", "7"], ["Anna", "9"], ["Kees", "8"]] {
+        text(&mut h, row[0]);
+        key(&mut h, Key::Tab);
+        text(&mut h, row[1]);
+        key(&mut h, Key::Enter);
+    }
+    click(&mut h, "B3", Modifiers::NONE);
+    command(&mut h, Command::SortDesc);
+    let names: Vec<String> = ["A1", "A2", "A3", "A4"].iter().map(|a| shown(&h, a)).collect();
+    assert_eq!(names, ["Naam", "Anna", "Kees", "Piet"]);
+    assert_eq!(h.state().view.sel.range().to_string(), "A1:B4");
+
+    click(&mut h, "A2", Modifiers::NONE);
+    command(&mut h, Command::SortAsc);
+    assert_eq!(shown(&h, "A2"), "Anna");
+    assert_eq!(shown(&h, "A4"), "Piet");
+    command(&mut h, Command::Undo);
+    command(&mut h, Command::Undo);
+    assert_eq!(shown(&h, "A2"), "Piet");
+}
+
+#[test]
+fn enter_after_tabs_returns_to_the_starting_column() {
+    let mut h = harness();
+    click(&mut h, "B2", Modifiers::NONE);
+    for v in ["a", "b"] {
+        text(&mut h, v);
+        key(&mut h, Key::Tab);
+    }
+    text(&mut h, "c");
+    key(&mut h, Key::Enter);
+    assert_eq!(h.state().view.sel.active, c("B3"));
+    assert_eq!(shown(&h, "D2"), "c");
+}

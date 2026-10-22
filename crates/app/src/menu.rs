@@ -45,6 +45,8 @@ pub enum Command {
     DeleteCols,
     FillDown,
     FillRight,
+    SortAsc,
+    SortDesc,
     Find,
     FindNext,
     FindPrev,
@@ -87,6 +89,8 @@ impl Command {
             Command::DeleteCols => "delete-cols".into(),
             Command::FillDown => "fill-down".into(),
             Command::FillRight => "fill-right".into(),
+            Command::SortAsc => "sort-asc".into(),
+            Command::SortDesc => "sort-desc".into(),
             Command::Find => "find".into(),
             Command::FindNext => "find-next".into(),
             Command::FindPrev => "find-prev".into(),
@@ -131,6 +135,8 @@ impl Command {
             Command::DeleteCols,
             Command::FillDown,
             Command::FillRight,
+            Command::SortAsc,
+            Command::SortDesc,
             Command::Find,
             Command::FindNext,
             Command::FindPrev,
@@ -283,6 +289,16 @@ impl AppMenu {
         )
         .expect("sheet menu");
 
+        let data = Submenu::with_items(
+            "Data",
+            true,
+            &[
+                &item("Sorteer oplopend (A tot Z)", Command::SortAsc, None),
+                &item("Sorteer aflopend (Z tot A)", Command::SortDesc, None),
+            ],
+        )
+        .expect("data menu");
+
         let window = Submenu::with_items(
             "Venster",
             true,
@@ -295,7 +311,7 @@ impl AppMenu {
         )
         .expect("window menu");
 
-        menu.append_items(&[&app, &file, &edit, &format, &sheet, &window]).expect("menu bar");
+        menu.append_items(&[&app, &file, &edit, &format, &data, &sheet, &window]).expect("menu bar");
         menu.init_for_nsapp();
         window.set_as_windows_menu_for_nsapp();
 

@@ -115,6 +115,9 @@ pub struct SheetView {
     sheet_views: HashMap<SheetId, (Selection, (f64, f64))>,
     pub rename: Option<Rename>,
     pub find: Option<FindBar>,
+    /// Column where a run of Tab presses started; Enter returns there on
+    /// the next row, like Excel.
+    tab_start: Option<u32>,
     pub sel: Selection,
     /// Scroll offset in points; f64 because a million rows exceed f32 precision.
     pub scroll: (f64, f64),
@@ -145,6 +148,7 @@ impl SheetView {
             sheet_views: HashMap::new(),
             rename: None,
             find: None,
+            tab_start: None,
             sel: Selection::single(CellRef::default()),
             scroll: (0.0, 0.0),
             edit: None,
@@ -382,6 +386,7 @@ impl SheetView {
                 self.sel = Selection::span(CellRef::default(), CellRef::new(MAX_ROWS - 1, MAX_COLS - 1));
             }
             Command::Delete => self.clear_selection(),
+            Command::SortAsc | Command::SortDesc => self.sort(command == Command::SortDesc),
             Command::Find | Command::Replace => {
                 let bar = self.find.get_or_insert_with(FindBar::default);
                 bar.replacing |= command == Command::Replace;
@@ -559,6 +564,7 @@ impl SheetView {
     // ----- selection -----
 
     pub fn select(&mut self, at: CellRef, extend: bool) {
+        self.tab_start = None;
         if extend {
             self.sel.corner = at;
         } else {
@@ -582,7 +588,16 @@ impl SheetView {
     pub fn advance(&mut self, drow: i64, dcol: i64) {
         let range = self.sel.range();
         if range.len() <= 1 {
-            self.move_by(drow, dcol, false, false);
+            let active = self.sel.active;
+            if dcol != 0 {
+                let start = self.tab_start.unwrap_or(active.col);
+                self.move_by(drow, dcol, false, false);
+                self.tab_start = Some(start);
+            } else if let (Some(start), true) = (self.tab_start, drow > 0) {
+                self.select(CellRef::new(active.row, start).offset_clamped(1, 0), false);
+            } else {
+                self.move_by(drow, dcol, false, false);
+            }
             return;
         }
         let a = self.sel.active;
@@ -633,6 +648,24 @@ impl SheetView {
             })
             .collect();
         self.doc.set_cells(self.sheet, changes, Some(self.sel.range()));
+    }
+
+    /// Sorts the selection (or, for a single cell, the block of data around
+    /// it) by the active cell's column, keeping a header row in place.
+    pub fn sort(&mut self, descending: bool) {
+        use rustsheet_core::sort::{current_region, has_header, sort_rows};
+        let sel = self.sel.range();
+        let range = if sel.len() == 1 { current_region(self.sheet(), self.sel.active) } else { sel };
+        if range.rows() < 2 {
+            return;
+        }
+        let header = has_header(self.sheet(), range);
+        let key = self.sel.active.col.clamp(range.start.col, range.end.col);
+        let changes = sort_rows(self.sheet(), range, key, descending, header);
+        self.doc.set_cells(self.sheet, changes, Some(sel));
+        self.sel = Selection { active: self.sel.active, anchor: range.start, corner: range.end };
+        self.status =
+            Some(if header { "Gesorteerd (eerste rij is kop)".into() } else { "Gesorteerd".into() });
     }
 
     /// Selects the next (or previous) match of the find bar's query.

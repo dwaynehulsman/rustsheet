@@ -14,6 +14,7 @@ pub mod formula;
 pub mod input;
 pub mod io;
 pub mod sheet;
+pub mod sort;
 pub mod value;
 pub mod workbook;
 
