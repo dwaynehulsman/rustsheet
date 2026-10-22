@@ -91,7 +91,33 @@ pub enum Align {
 pub struct CellFormat {
     pub num: NumFmt,
     pub bold: bool,
+    pub italic: bool,
     pub align: Align,
+    /// Text colour; `None` is the default (black, or white in dark mode).
+    pub color: Option<Rgb>,
+    /// Background fill; `None` is no fill.
+    pub fill: Option<Rgb>,
+}
+
+/// An sRGB colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl Rgb {
+    /// Parses `RRGGBB` or Excel's `AARRGGBB`.
+    pub fn from_hex(s: &str) -> Option<Rgb> {
+        let hex = match s.len() {
+            8 => &s[2..],
+            6 => s,
+            _ => return None,
+        };
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        Some(Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+    }
+
+    pub fn to_u32(self) -> u32 {
+        (u32::from(self.0) << 16) | (u32::from(self.1) << 8) | u32::from(self.2)
+    }
 }
 
 impl CellFormat {
@@ -511,6 +537,14 @@ mod tests {
         assert_eq!(date_to_serial(1900, 3, 1), Some(61.0));
         assert_eq!(date_to_serial(2023, 2, 29), None);
         assert_eq!(format_value(&Value::Number(46317.0), NumFmt::Date), "22-10-2026");
+    }
+
+    #[test]
+    fn colours_parse_from_excel_hex() {
+        assert_eq!(Rgb::from_hex("FFC00000"), Some(Rgb(0xC0, 0, 0)));
+        assert_eq!(Rgb::from_hex("0070C0"), Some(Rgb(0, 0x70, 0xC0)));
+        assert_eq!(Rgb::from_hex("xyz"), None);
+        assert_eq!(Rgb(0x12, 0x34, 0x56).to_u32(), 0x123456);
     }
 
     #[test]

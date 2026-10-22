@@ -553,3 +553,31 @@ fn find_and_replace_bar() {
     key(&mut h, Key::Escape);
     assert!(h.state().view.find.is_none());
 }
+
+#[test]
+fn italic_and_colours_from_the_toolbar() {
+    let mut h = harness();
+    text(&mut h, "kleur");
+    key(&mut h, Key::Enter);
+    key(&mut h, Key::ArrowUp);
+    command(&mut h, Command::Italic);
+    assert!(h.state().view.sheet().format(c("A1")).italic);
+
+    h.get_by_label("Tekstkleur").click();
+    h.run();
+    h.get_by_label("Rood").click();
+    h.run();
+    h.get_by_label("Opvulkleur").click();
+    h.run();
+    h.get_by_label("Geel").click();
+    h.run();
+    let f = h.state().view.sheet().format(c("A1"));
+    assert_eq!(f.color, Some(rustsheet_core::format::Rgb(0xFF, 0, 0)));
+    assert_eq!(f.fill, Some(rustsheet_core::format::Rgb(0xFF, 0xFF, 0)));
+
+    h.get_by_label("Opvulkleur").click();
+    h.run();
+    h.get_by_label("Geen opvulling").click();
+    h.run();
+    assert_eq!(h.state().view.sheet().format(c("A1")).fill, None);
+}

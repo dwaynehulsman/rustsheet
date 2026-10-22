@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use egui::{Event, Key, Modifiers, Ui};
 use rustsheet_core::clipboard::{Block, to_tsv};
+use rustsheet_core::format::Rgb;
 use rustsheet_core::formula::sheet_prefix;
 use rustsheet_core::{
     Align, CellFormat, CellRef, CellState, Change, Content, Document, MAX_COLS, MAX_ROWS, NumFmt, Range,
@@ -416,6 +417,12 @@ impl SheetView {
                 let bold = !self.sheet().format(self.sel.active).bold;
                 self.format_selection(|f| f.bold = bold);
             }
+            Command::Italic => {
+                let italic = !self.sheet().format(self.sel.active).italic;
+                self.format_selection(|f| f.italic = italic);
+            }
+            Command::TextColor(color) => self.format_selection(|f| f.color = color),
+            Command::FillColor(fill) => self.format_selection(|f| f.fill = fill),
             Command::Align(align) => self.format_selection(|f| f.align = align),
             Command::NumFmt(num) => self.format_selection(|f| f.num = num),
             // File commands are handled by the app shell.
@@ -892,6 +899,20 @@ impl SheetView {
             if ui.add(egui::Button::selectable(format.bold, bold)).on_hover_text("Vet (⌘B)").clicked() {
                 clicked = Some(Command::Bold);
             }
+            let italic =
+                egui::RichText::new("I").font(egui::FontId::new(14.0, crate::fonts::family(false, true)));
+            let italic =
+                ui.add(egui::Button::selectable(format.italic, italic)).on_hover_text("Cursief (⌘I)");
+            accessible_name(ui, &italic, "Cursief");
+            if italic.clicked() {
+                clicked = Some(Command::Italic);
+            }
+            if let Some(c) = color_menu(ui, "Tekstkleur", format.color, false) {
+                clicked = Some(Command::TextColor(c));
+            }
+            if let Some(c) = color_menu(ui, "Opvulkleur", format.fill, true) {
+                clicked = Some(Command::FillColor(c));
+            }
             ui.separator();
             for (align, label, tip) in [
                 (Align::Left, "Links", "Lijn links uit"),
@@ -1196,6 +1217,71 @@ impl SheetView {
             });
         });
     }
+}
+
+/// Excel's standard colours, with Dutch names.
+const COLORS: [(&str, Rgb); 13] = [
+    ("Donkerrood", Rgb(0xC0, 0x00, 0x00)),
+    ("Rood", Rgb(0xFF, 0x00, 0x00)),
+    ("Oranje", Rgb(0xFF, 0xC0, 0x00)),
+    ("Geel", Rgb(0xFF, 0xFF, 0x00)),
+    ("Lichtgroen", Rgb(0x92, 0xD0, 0x50)),
+    ("Groen", Rgb(0x00, 0xB0, 0x50)),
+    ("Lichtblauw", Rgb(0x00, 0xB0, 0xF0)),
+    ("Blauw", Rgb(0x00, 0x70, 0xC0)),
+    ("Donkerblauw", Rgb(0x00, 0x20, 0x60)),
+    ("Paars", Rgb(0x70, 0x30, 0xA0)),
+    ("Zwart", Rgb(0x00, 0x00, 0x00)),
+    ("Grijs", Rgb(0x80, 0x80, 0x80)),
+    ("Wit", Rgb(0xFF, 0xFF, 0xFF)),
+];
+
+/// A toolbar button that opens a colour palette. Returns the chosen colour
+/// (`Some(None)` for "none") when one is picked.
+fn color_menu(ui: &mut Ui, name: &str, current: Option<Rgb>, fill: bool) -> Option<Option<Rgb>> {
+    let default = ui.visuals().text_color();
+    let shown = current.map_or(default, |c| egui::Color32::from_rgb(c.0, c.1, c.2));
+    let mut picked = None;
+    // Text colour: an "A" in that colour; fill: a filled square.
+    let label = if fill {
+        egui::RichText::new("■").color(if current.is_some() { shown } else { ui.visuals().weak_text_color() })
+    } else {
+        egui::RichText::new("A").color(shown)
+    };
+    let response = ui
+        .menu_button(label, |ui| {
+            ui.set_min_width(150.0);
+            ui.label(name);
+            egui::Grid::new(name).spacing(egui::vec2(4.0, 4.0)).show(ui, |ui| {
+                for (i, (label, c)) in COLORS.iter().enumerate() {
+                    let (rect, r) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                    ui.painter().rect_filled(rect, 3.0, egui::Color32::from_rgb(c.0, c.1, c.2));
+                    let stroke = if current == Some(*c) { 2.0 } else { 0.5 };
+                    ui.painter().rect_stroke(
+                        rect,
+                        3.0,
+                        egui::Stroke::new(stroke, ui.visuals().text_color()),
+                        egui::StrokeKind::Inside,
+                    );
+                    accessible_name(ui, &r, label);
+                    if r.on_hover_text(*label).clicked() {
+                        picked = Some(Some(*c));
+                        ui.close();
+                    }
+                    if i % 5 == 4 {
+                        ui.end_row();
+                    }
+                }
+            });
+            if ui.button(if fill { "Geen opvulling" } else { "Automatisch" }).clicked() {
+                picked = Some(None);
+                ui.close();
+            }
+        })
+        .response;
+    accessible_name(ui, &response, name);
+    response.on_hover_text(name);
+    picked
 }
 
 /// Gives a widget a name for VoiceOver and other assistive technology.

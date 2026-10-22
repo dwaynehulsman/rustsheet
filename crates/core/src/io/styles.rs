@@ -9,7 +9,7 @@ use quick_xml::{Reader, XmlVersion};
 use zip::ZipArchive;
 
 use crate::addr::CellRef;
-use crate::format::{Align, CellFormat, NumFmt};
+use crate::format::{Align, CellFormat, NumFmt, Rgb};
 
 /// Styling found for one worksheet.
 #[derive(Debug, Default)]
@@ -99,7 +99,11 @@ fn sheet_paths<R: Read + Seek>(zip: &mut ZipArchive<R>) -> HashMap<String, Strin
 fn cell_xfs<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CellFormat> {
     let Some(reader) = read_part(zip, "xl/styles.xml") else { return Vec::new() };
     let mut custom: HashMap<u32, NumFmt> = HashMap::new();
-    let mut bold_fonts: Vec<bool> = Vec::new();
+    // (bold, italic, colour) per font, and the solid colour per fill.
+    let mut fonts: Vec<(bool, bool, Option<Rgb>)> = Vec::new();
+    let mut fills: Vec<Option<Rgb>> = Vec::new();
+    let mut in_fill = false;
+    let mut solid = false;
     let mut xfs: Vec<CellFormat> = Vec::new();
     let mut section = String::new();
     let mut in_font = false;
@@ -113,7 +117,9 @@ fn cell_xfs<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CellFormat> {
                 let empty = matches!(event, Ok(Event::Empty(_)));
                 let name = e.local_name().as_ref().to_string();
                 match name.as_str() {
-                    "numFmts" | "fonts" | "cellXfs" | "cellStyleXfs" if !empty => section = name.clone(),
+                    "numFmts" | "fonts" | "fills" | "cellXfs" | "cellStyleXfs" if !empty => {
+                        section = name.clone()
+                    }
                     "numFmt" => {
                         if let (Some(id), Some(code)) = (attr(e, "numFmtId"), attr(e, "formatCode"))
                             && let Ok(id) = id.parse()
@@ -122,22 +128,47 @@ fn cell_xfs<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CellFormat> {
                         }
                     }
                     "font" if section == "fonts" => {
-                        bold_fonts.push(false);
+                        fonts.push((false, false, None));
                         in_font = !empty;
                     }
-                    "b" if in_font => {
+                    "b" | "i" if in_font => {
                         let on = attr(e, "val").is_none_or(|v| v != "0" && v != "false");
-                        if let Some(last) = bold_fonts.last_mut() {
-                            *last = on;
+                        if let Some(last) = fonts.last_mut() {
+                            if name == "b" { last.0 = on } else { last.1 = on }
+                        }
+                    }
+                    "color" if in_font => {
+                        // Theme and indexed colours are left at the default.
+                        let rgb =
+                            attr(e, "rgb").and_then(|v| Rgb::from_hex(&v)).filter(|c| *c != Rgb(0, 0, 0));
+                        if let Some(last) = fonts.last_mut() {
+                            last.2 = rgb;
+                        }
+                    }
+                    "fill" if section == "fills" => {
+                        fills.push(None);
+                        in_fill = !empty;
+                        solid = false;
+                    }
+                    "patternFill" if in_fill => solid = attr(e, "patternType").as_deref() == Some("solid"),
+                    "fgColor" if in_fill && solid => {
+                        if let Some(last) = fills.last_mut() {
+                            *last = attr(e, "rgb").and_then(|v| Rgb::from_hex(&v));
                         }
                     }
                     "xf" if section == "cellXfs" => {
                         let num_id: u32 = attr(e, "numFmtId").and_then(|v| v.parse().ok()).unwrap_or(0);
                         let font_id: usize = attr(e, "fontId").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let fill_id: usize = attr(e, "fillId").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let (bold, italic, color) =
+                            fonts.get(font_id).copied().unwrap_or((false, false, None));
                         xfs.push(CellFormat {
                             num: custom.get(&num_id).copied().unwrap_or_else(|| builtin_num_fmt(num_id)),
-                            bold: bold_fonts.get(font_id).copied().unwrap_or(false),
+                            bold,
+                            italic,
                             align: Align::General,
+                            color,
+                            fill: fills.get(fill_id).copied().flatten(),
                         });
                     }
                     "alignment" if section == "cellXfs" => {
@@ -157,6 +188,8 @@ fn cell_xfs<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CellFormat> {
                 let name = e.local_name();
                 if name.as_ref() == "font" {
                     in_font = false;
+                } else if name.as_ref() == "fill" {
+                    in_fill = false;
                 } else if name.as_ref() == section {
                     section.clear();
                 }

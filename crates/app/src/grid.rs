@@ -2,14 +2,13 @@
 //! headers, selection, column resizing, scrollbars, mouse and keyboard.
 
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, Event, EventFilter, FontFamily, FontId, Key, Pos2, Rect,
-    Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
+    Align2, Color32, CornerRadius, CursorIcon, Event, EventFilter, FontId, Key, Pos2, Rect, Sense, Shape,
+    Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 use rustsheet_core::format::{Align as CellAlign, format_value};
 use rustsheet_core::sheet::{DEFAULT_COL_WIDTH, MIN_COL_WIDTH};
 use rustsheet_core::{CellRef, MAX_COLS, MAX_ROWS, Range, Value, addr::col_name};
 
-use crate::fonts::bold_family;
 use crate::menu::Command;
 use crate::view::{Env, Selection, SheetView, take_edit_keys, take_key};
 
@@ -772,13 +771,26 @@ impl SheetView {
             cells_painter.line_segment([pos2(g.cells.left(), y), pos2(g.cells.right(), y)], hair);
         }
 
-        // Selection fill, with the active cell left clear like Excel.
+        // Background fills cover the gridlines, as in Excel.
+        let fill_of = |at: CellRef| {
+            sheet.cell(at).and_then(|c| c.format.fill).map(|f| Color32::from_rgb(f.0, f.1, f.2))
+        };
+        for &(row, y) in &g.rows {
+            for &(col, x, w) in &g.cols {
+                if let Some(fill) = fill_of(CellRef::new(row, col)) {
+                    cells_painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(w, ROW_H)), 0.0, fill);
+                }
+            }
+        }
+
+        // Selection tint, with the active cell left clear like Excel.
         let sel = self.sel.range();
         let sel_rect = self.range_rect(g, sel);
         if sel.len() > 1 {
             cells_painter.rect_filled(sel_rect, 0.0, p.selection);
             let active = self.range_rect(g, Range::single(self.sel.active));
-            cells_painter.rect_filled(active.shrink(1.0), 0.0, p.background);
+            let under = fill_of(self.sel.active).unwrap_or(p.background);
+            cells_painter.rect_filled(active.shrink(1.0), 0.0, under);
         }
 
         // Cell text.
@@ -810,7 +822,8 @@ impl SheetView {
                 if cell.value.is_empty() && bar_text.is_none() {
                     continue;
                 }
-                let family = if cell.format.bold { bold_family() } else { FontFamily::Proportional };
+                let family = crate::fonts::family(cell.format.bold, cell.format.italic);
+                let text_color = cell.format.color.map_or(p.text, |c| Color32::from_rgb(c.0, c.1, c.2));
                 let font = FontId::new(CELL_FONT, family);
                 let (text, align) = match bar_text {
                     Some(t) => (t, CellAlign::Left),
@@ -818,12 +831,12 @@ impl SheetView {
                         (format_value(&cell.value, cell.format.num), cell.format.effective_align(&cell.value))
                     }
                 };
-                let mut galley = painter.layout_no_wrap(text, font.clone(), p.text);
+                let mut galley = painter.layout_no_wrap(text, font.clone(), text_color);
                 let avail = w - 2.0 * PAD;
                 if matches!(cell.value, Value::Number(_)) && galley.size().x > avail {
                     // Numbers never get cut off silently; Excel shows hashes.
                     let n = (avail / 7.0).max(1.0) as usize;
-                    galley = painter.layout_no_wrap("#".repeat(n), font, p.text);
+                    galley = painter.layout_no_wrap("#".repeat(n), font, text_color);
                 }
                 let gw = galley.size().x;
                 let tx = match align {
@@ -858,7 +871,7 @@ impl SheetView {
                     }
                 }
                 let pos = pos2(tx, y + (ROW_H - galley.size().y) / 2.0);
-                cells_painter.with_clip_rect(clip.intersect(g.cells)).galley(pos, galley, p.text);
+                cells_painter.with_clip_rect(clip.intersect(g.cells)).galley(pos, galley, text_color);
             }
         }
 
@@ -955,7 +968,7 @@ impl SheetView {
         let Some(edit) = &self.edit else { return };
         let cell = edit.cell;
         let format = self.sheet().format(cell);
-        let family = if format.bold { bold_family() } else { FontFamily::Proportional };
+        let family = crate::fonts::family(format.bold, format.italic);
         let font = FontId::new(CELL_FONT, family);
         let text_w = ui.painter().layout_no_wrap(edit.text.clone(), font.clone(), p.text).size().x;
 

@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::Path;
 
 use calamine::{Data, Reader, open_workbook_auto};
-use rust_xlsxwriter::{Format, FormatAlign, Formula, Workbook};
+use rust_xlsxwriter::{Color, Format, FormatAlign, Formula, Workbook};
 
 use super::IoError;
 use super::styles::{SheetStyles, read_styles};
@@ -166,6 +166,15 @@ fn xlsx_format(f: &CellFormat) -> Format {
     }
     if f.bold {
         format = format.set_bold();
+    }
+    if f.italic {
+        format = format.set_italic();
+    }
+    if let Some(c) = f.color {
+        format = format.set_font_color(Color::RGB(c.to_u32()));
+    }
+    if let Some(c) = f.fill {
+        format = format.set_background_color(Color::RGB(c.to_u32()));
     }
     match f.align {
         Align::General => {}
@@ -355,6 +364,13 @@ mod tests {
             Book::from_sheets(vec![Sheet::new("Overzicht"), Sheet::new("Kosten 2026"), Sheet::new("Data")]);
         set(&mut book, 1, "A1", "100", CellFormat::default());
         set(&mut book, 1, "A2", "250", CellFormat { bold: true, ..CellFormat::default() });
+        let colourful = CellFormat {
+            italic: true,
+            color: Some(crate::format::Rgb(0xC0, 0, 0)),
+            fill: Some(crate::format::Rgb(0xFF, 0xFF, 0)),
+            ..CellFormat::default()
+        };
+        set(&mut book, 1, "B2", "let op", colourful);
         set(&mut book, 2, "B5", "7", CellFormat::default());
         set(&mut book, 0, "A1", "=SUM('Kosten 2026'!A1:A2)", CellFormat::default());
         set(&mut book, 0, "A2", "=Data!B5*'Kosten 2026'!A1", CellFormat::default());
@@ -371,6 +387,7 @@ mod tests {
         assert_eq!(back.sheet(2).display(c("C1")), "175");
         assert_eq!(back.sheet(0).state(c("A1")).content.source(), "=SUM('Kosten 2026'!A1:A2)");
         assert!(back.sheet(1).format(c("A2")).bold);
+        assert_eq!(back.sheet(1).format(c("B2")), colourful);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 use muda::accelerator::Accelerator;
 use muda::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use rustsheet_core::format::Rgb;
 use rustsheet_core::{Align, NumFmt};
 
 /// Everything the menu bar, toolbar and shortcuts can ask for.
@@ -27,6 +28,9 @@ pub enum Command {
     SelectAll,
     Delete,
     Bold,
+    Italic,
+    TextColor(Option<Rgb>),
+    FillColor(Option<Rgb>),
     Align(Align),
     NumFmt(NumFmt),
     AddSheet,
@@ -66,6 +70,9 @@ impl Command {
             Command::SelectAll => "select-all".into(),
             Command::Delete => "delete".into(),
             Command::Bold => "bold".into(),
+            Command::Italic => "italic".into(),
+            Command::TextColor(c) => format!("text-color:{c:?}"),
+            Command::FillColor(c) => format!("fill-color:{c:?}"),
             Command::Align(a) => format!("align:{a:?}"),
             Command::NumFmt(f) => format!("numfmt:{f:?}"),
             Command::AddSheet => "add-sheet".into(),
@@ -107,6 +114,7 @@ impl Command {
             Command::SelectAll,
             Command::Delete,
             Command::Bold,
+            Command::Italic,
             Command::Align(Align::General),
             Command::Align(Align::Left),
             Command::Align(Align::Center),
@@ -248,6 +256,7 @@ impl AppMenu {
             true,
             &[
                 &item("Vet", Command::Bold, Some("CmdOrCtrl+B")),
+                &item("Cursief", Command::Italic, Some("CmdOrCtrl+I")),
                 &PredefinedMenuItem::separator(),
                 &item("Lijn links uit", Command::Align(Align::Left), Some("CmdOrCtrl+Shift+BracketLeft")),
                 &item("Centreer", Command::Align(Align::Center), Some("CmdOrCtrl+Shift+Backslash")),
