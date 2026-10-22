@@ -45,7 +45,13 @@ impl Bench {
 
     /// Advances one frame; returns true when the run is finished.
     /// `ready` is false while files are still loading; measuring starts after.
-    pub fn step(&mut self, ctx: &egui::Context, frame: &eframe::Frame, view: &mut SheetView, ready: bool) -> bool {
+    pub fn step(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        view: &mut SheetView,
+        ready: bool,
+    ) -> bool {
         if self.finished {
             return true;
         }

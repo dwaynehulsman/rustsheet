@@ -255,3 +255,35 @@ fn double_click_edits_the_cell() {
     h.run();
     assert!(h.state().view.edit.as_ref().is_some_and(|e| e.text == "x"));
 }
+
+#[test]
+fn dragging_a_column_border_resizes_and_undoes() {
+    let mut h = harness();
+    let view = &h.state().view;
+    let a = view.cell_center(c("A1"));
+    let b = view.cell_center(c("B1"));
+    // The border between A and B, in the column header row above row 1.
+    let start = egui::pos2((a.x + b.x) / 2.0, a.y - crate::grid::HEADER_H);
+    h.hover_at(start);
+    h.event(Event::PointerButton {
+        pos: start,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    h.step();
+    let end = start + egui::vec2(60.0, 0.0);
+    h.event(Event::PointerMoved(end));
+    h.step();
+    h.event(Event::PointerButton {
+        pos: end,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run();
+    let width = h.state().view.doc.sheet.col_width(0);
+    assert!((width - (rustsheet_core::sheet::DEFAULT_COL_WIDTH + 60.0)).abs() < 1.0, "width {width}");
+    command(&mut h, Command::Undo);
+    assert_eq!(h.state().view.doc.sheet.custom_col_width(0), None);
+}
