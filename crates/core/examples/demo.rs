@@ -3,6 +3,8 @@
 //!
 //! cargo run -p rustsheet-core --example demo -- demo.xlsx
 
+use rustsheet_core::filter::AutoFilter;
+use rustsheet_core::format::Rgb;
 use rustsheet_core::{Align, CellFormat, CellRef, CellState, NumFmt, Sheet, Workbook, io, parse_input};
 
 fn main() {
@@ -96,6 +98,31 @@ fn main() {
     }
     sheet.set_col_width(0, Some(120.0));
     sheet.set_col_width(4, Some(150.0));
+    // Some styling: a taller title row, a coloured header, frozen headers and a filter.
+    sheet.set_row_height(0, Some(30.0));
+    let header_fill = Some(Rgb(0xDD, 0xEB, 0xF7));
+    for col in 0..5 {
+        let at = CellRef::new(2, col);
+        let mut state = sheet.state(at);
+        state.format.fill = header_fill;
+        sheet.put(at, state);
+    }
+    for row in 3..8 {
+        let at = CellRef::new(row, 4);
+        let mut state = sheet.state(at);
+        state.format.italic = true;
+        state.format.color = Some(Rgb(0x59, 0x59, 0x59));
+        sheet.put(at, state);
+    }
+    let at = CellRef::new(12, 0);
+    let mut state = sheet.state(at);
+    state.format.color = Some(Rgb(0xC0, 0, 0));
+    sheet.put(at, state);
+    sheet.set_freeze(3, 0);
+    sheet.set_filter(Some(AutoFilter::new(rustsheet_core::Range::new(
+        CellRef::new(2, 0),
+        CellRef::new(7, 4),
+    ))));
 
     // A second sheet that reads totals from the first.
     let mut notes = Sheet::new("Toelichting");

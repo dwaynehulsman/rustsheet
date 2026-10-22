@@ -717,6 +717,13 @@ impl SheetView {
             Some(if header { "Gesorteerd (eerste rij is kop)".into() } else { "Gesorteerd".into() });
     }
 
+    /// What to print or export: the selection when it is a real block,
+    /// otherwise everything on the sheet.
+    pub fn print_range(&self) -> Option<Range> {
+        let r = self.sel.range();
+        (r.len() > 1 && r.rows() < MAX_ROWS && r.cols() < MAX_COLS).then_some(r)
+    }
+
     /// Opens the value list of the filter button in column `col`.
     pub fn open_filter_popup(&mut self, col: u32, anchor: egui::Pos2) {
         let Some(filter) = self.sheet().filter() else { return };

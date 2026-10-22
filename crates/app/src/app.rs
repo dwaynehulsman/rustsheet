@@ -310,6 +310,60 @@ impl RustsheetApp {
             Command::SaveAs => {
                 self.save(index, true);
             }
+            Command::ExportPdf | Command::Print => {
+                let view = &self.windows[index].view;
+                let pdf = rustsheet_core::pdf::sheet_to_pdf(view.sheet(), view.print_range());
+                let stem = format!(
+                    "{} - {}",
+                    view.name().trim_end_matches(".xlsx").trim_end_matches(".csv"),
+                    view.sheet().name()
+                );
+                let path = if command == Command::Print {
+                    // Print through Preview, which brings the macOS print dialog.
+                    let dir = std::env::temp_dir().join("rustsheet-afdrukken");
+                    let _ = std::fs::create_dir_all(&dir);
+                    Some(dir.join(format!("{stem}.pdf")))
+                } else {
+                    FileDialog::new()
+                        .set_title("Exporteer als PDF")
+                        .set_file_name(format!("{stem}.pdf"))
+                        .add_filter("PDF", &["pdf"])
+                        .save_file()
+                };
+                let Some(path) = path else { return };
+                let printing = command == Command::Print;
+                match std::fs::write(&path, pdf) {
+                    Ok(()) => {
+                        let view = &mut self.windows[index].view;
+                        if printing {
+                            let _ = std::process::Command::new("open").arg(&path).spawn();
+                            view.status = Some("Geopend in Voorvertoning: druk af met ⌘P".into());
+                        } else {
+                            view.status = Some(format!("Geëxporteerd naar {}", path.display()));
+                        }
+                    }
+                    Err(e) => error_dialog("Kan PDF niet maken", &format!("{}\n\n{e}", path.display())),
+                }
+            }
+            Command::ExportCsv => {
+                let view = &self.windows[index].view;
+                let stem = view.sheet().name().to_string();
+                let Some(path) = FileDialog::new()
+                    .set_title("Exporteer als CSV")
+                    .set_file_name(format!("{stem}.csv"))
+                    .add_filter("CSV", &["csv"])
+                    .save_file()
+                else {
+                    return;
+                };
+                match io::write_csv(view.sheet(), &path) {
+                    Ok(()) => {
+                        self.windows[index].view.status =
+                            Some(format!("Geëxporteerd naar {}", path.display()))
+                    }
+                    Err(e) => error_dialog("Kan CSV niet maken", &format!("{}\n\n{e}", path.display())),
+                }
+            }
             Command::Close => {
                 ctx.send_viewport_cmd_to(viewport_of(self.windows[index].id, index), ViewportCommand::Close);
             }
