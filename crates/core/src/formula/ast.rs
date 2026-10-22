@@ -165,6 +165,8 @@ pub enum Expr {
     Call(String, Vec<Expr>),
     /// An identifier that is not a function, reference or boolean.
     Name(String),
+    /// An argument left out, as in `XLOOKUP(x,a,b,,0)`: the function uses its default.
+    Missing,
 }
 
 /// A cell or range a formula reads, on a given sheet; used by the
@@ -200,7 +202,12 @@ impl Expr {
             Expr::Call(name, args) => {
                 Expr::Call(name.clone(), args.iter().map(|a| a.shifted(drow, dcol)).collect())
             }
-            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name(_) => self.clone(),
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Name(_)
+            | Expr::Missing => self.clone(),
         }
     }
 
@@ -241,6 +248,18 @@ impl Expr {
             }
             Expr::Call(_, args) => args.iter().for_each(|a| a.precedents(own, resolve, out)),
             _ => {}
+        }
+    }
+
+    /// Whether the value can change without any cell changing (TODAY, NOW).
+    pub fn is_volatile(&self) -> bool {
+        match self {
+            Expr::Call(name, args) => {
+                matches!(name.as_str(), "TODAY" | "NOW") || args.iter().any(Expr::is_volatile)
+            }
+            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.is_volatile(),
+            Expr::Binary(first, rest) => first.is_volatile() || rest.iter().any(|(_, e)| e.is_volatile()),
+            _ => false,
         }
     }
 
@@ -361,6 +380,7 @@ impl fmt::Display for Expr {
                 f.write_str(")")
             }
             Expr::Name(n) => f.write_str(n),
+            Expr::Missing => Ok(()),
         }
     }
 }

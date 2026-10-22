@@ -440,7 +440,12 @@ impl Parser {
             self.next();
         } else {
             loop {
-                args.push(self.expr(0)?);
+                // An empty argument (`f(a,,b)` or `f(a,)`) is left out.
+                if matches!(self.peek(), Tok::Sep | Tok::RParen) {
+                    args.push(Expr::Missing);
+                } else {
+                    args.push(self.expr(0)?);
+                }
                 match self.next() {
                     Tok::Sep => continue,
                     Tok::RParen => break,
@@ -563,6 +568,8 @@ mod tests {
         assert_eq!(round_trip("=1.5e3"), "1500");
         assert_eq!(round_trip("=#div/0!"), "#DIV/0!");
         assert_eq!(round_trip("=TRUE()"), "TRUE");
+        assert_eq!(round_trip("=XLOOKUP(1,A1:A3,B1:B3,,0, -1)"), "XLOOKUP(1,A1:A3,B1:B3,,0,-1)");
+        assert_eq!(round_trip("=IF(A1,,2)"), "IF(A1,,2)");
     }
 
     #[test]

@@ -8,6 +8,7 @@ authors.workspace = true
 [dependencies]
 calamine = "0.37.0"
 csv = "1.4.0"
+libc = "0.2.191"
 quick-xml = "0.42.0"
 rust_xlsxwriter = "0.101.0"
 rustc-hash = "2.1.3"

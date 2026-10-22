@@ -12,28 +12,81 @@ pub trait CellSource {
     fn value(&self, sheet: SheetId, at: CellRef) -> &Value;
     /// Calls `f` for every non-empty cell in `range`; stops early when it returns `false`.
     fn for_each_value(&self, sheet: SheetId, range: Range, f: &mut dyn FnMut(&Value) -> bool);
+    /// Like [`CellSource::for_each_value`] but with each cell's position,
+    /// column by column and top to bottom within a column.
+    fn for_each_cell(&self, sheet: SheetId, range: Range, f: &mut dyn FnMut(CellRef, &Value) -> bool);
 }
+
+mod more;
 
 /// Names of all functions the evaluator knows, for autocompletion and docs.
 pub const FUNCTIONS: &[&str] = &[
     "ABS",
     "AND",
     "AVERAGE",
+    "AVERAGEIF",
+    "AVERAGEIFS",
     "CONCAT",
     "CONCATENATE",
     "COUNT",
     "COUNTA",
+    "COUNTBLANK",
+    "COUNTIF",
+    "COUNTIFS",
+    "DATE",
+    "DAY",
+    "FIND",
+    "HLOOKUP",
     "IF",
     "IFERROR",
+    "IFNA",
+    "IFS",
+    "INDEX",
+    "INT",
+    "ISBLANK",
+    "ISERROR",
+    "ISLOGICAL",
+    "ISNA",
+    "ISNUMBER",
+    "ISTEXT",
+    "LEFT",
     "LEN",
     "LOWER",
+    "MATCH",
     "MAX",
+    "MAXIFS",
+    "MEDIAN",
+    "MID",
     "MIN",
+    "MINIFS",
+    "MOD",
+    "MONTH",
+    "NA",
     "NOT",
+    "NOW",
     "OR",
+    "POWER",
+    "REPT",
+    "RIGHT",
     "ROUND",
+    "ROUNDDOWN",
+    "ROUNDUP",
+    "SEARCH",
+    "SQRT",
+    "SUBSTITUTE",
     "SUM",
+    "SUMIF",
+    "SUMIFS",
+    "SUMPRODUCT",
+    "TEXT",
+    "TODAY",
+    "TRIM",
     "UPPER",
+    "VALUE",
+    "VLOOKUP",
+    "WEEKDAY",
+    "XLOOKUP",
+    "YEAR",
 ];
 
 /// Evaluates `expr` as a formula on sheet `sheet`.
@@ -119,6 +172,7 @@ impl Eval<'_> {
             }
             Expr::Call(name, args) => self.call(name, args).unwrap_or_else(Value::Error),
             Expr::Name(_) => Value::Error(ErrorKind::Name),
+            Expr::Missing => Value::Empty,
         }
     }
 
@@ -345,7 +399,7 @@ impl Eval<'_> {
                 arity(1, 1)?;
                 Ok(Value::Text(self.scalar(&args[0]).to_text()?.to_lowercase()))
             }
-            _ => Err(ErrorKind::Name),
+            _ => self.call_more(name, args),
         }
     }
 }

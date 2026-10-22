@@ -7,7 +7,7 @@ default-members = ["crates/core", "crates/app", "tools/icon"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-authors = ["Dwayne Hulsman <dhulsman@infodatek.com>"]
+authors = ["Dwayne Hulsman <9630519+dwaynehulsman@users.noreply.github.com>"]
 
 [profile.release]
 lto = "thin"

@@ -212,6 +212,278 @@ fn days_in_month(y: i64, m: u32) -> u32 {
     }
 }
 
+const DAYS: [&str; 7] = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"];
+const MONTHS: [&str; 12] = [
+    "januari",
+    "februari",
+    "maart",
+    "april",
+    "mei",
+    "juni",
+    "juli",
+    "augustus",
+    "september",
+    "oktober",
+    "november",
+    "december",
+];
+const MONTHS_SHORT: [&str; 12] =
+    ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
+
+/// Day of the week for an Excel serial date: 0 is Sunday.
+pub fn weekday(serial: f64) -> u32 {
+    ((serial.floor() as i64 - 1).rem_euclid(7)) as u32
+}
+
+/// One token of a format code section.
+#[derive(Debug, PartialEq)]
+enum Tok {
+    Lit(String),
+    /// Quoted or backslash-escaped text: never a placeholder.
+    Quoted(String),
+    /// A run of one date/time letter, e.g. `dd` or `yyyy`.
+    Date(char, usize),
+    AmPm,
+}
+
+/// Splits on `;` outside quotes and brackets.
+fn sections(code: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut quoted, mut escaped) = (0, false, false);
+    for (i, c) in code.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                out.push(&code[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&code[start..]);
+    out
+}
+
+/// Literal text of a section: quoted parts, escaped characters, the rest as is.
+fn literal_tokens(section: &str, date: bool) -> Vec<Tok> {
+    let mut toks = Vec::new();
+    let chars: Vec<char> = section.chars().collect();
+    let mut i = 0;
+    let push_lit = |toks: &mut Vec<Tok>, s: &str| match toks.last_mut() {
+        Some(Tok::Lit(l)) => l.push_str(s),
+        _ => toks.push(Tok::Lit(s.to_string())),
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '"' => {
+                let end = chars[i + 1..].iter().position(|&x| x == '"').map_or(chars.len(), |p| i + 1 + p);
+                toks.push(Tok::Quoted(chars[i + 1..end.min(chars.len())].iter().collect()));
+                i = end + 1;
+            }
+            '\\' if i + 1 < chars.len() => {
+                toks.push(Tok::Quoted(chars[i + 1].to_string()));
+                i += 2;
+            }
+            '[' => {
+                // Colours and conditions are ignored.
+                let end = chars[i..].iter().position(|&x| x == ']').map_or(chars.len(), |p| i + p);
+                i = end + 1;
+            }
+            _ if date && section[char_offset(&chars, i)..].to_ascii_uppercase().starts_with("AM/PM") => {
+                toks.push(Tok::AmPm);
+                i += 5;
+            }
+            _ if date && "dmyhsDMYHS".contains(c) => {
+                let lower = c.to_ascii_lowercase();
+                let mut n = 1;
+                while i + n < chars.len() && chars[i + n].to_ascii_lowercase() == lower {
+                    n += 1;
+                }
+                toks.push(Tok::Date(lower, n));
+                i += n;
+            }
+            _ => {
+                push_lit(&mut toks, &c.to_string());
+                i += 1;
+            }
+        }
+    }
+    toks
+}
+
+fn char_offset(chars: &[char], i: usize) -> usize {
+    chars[..i].iter().map(|c| c.len_utf8()).sum()
+}
+
+fn format_date_section(serial: f64, section: &str) -> String {
+    let toks = literal_tokens(section, true);
+    let Some((y, mo, d)) = serial_to_date(serial) else { return "#####".to_string() };
+    let secs = ((serial - serial.floor()) * 86_400.0).round() as u32;
+    let (mut h, mi, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    let ampm = toks.contains(&Tok::AmPm);
+    let pm = h >= 12;
+    if ampm {
+        h %= 12;
+        if h == 0 {
+            h = 12;
+        }
+    }
+    let mut out = String::new();
+    for (i, tok) in toks.iter().enumerate() {
+        match tok {
+            Tok::Lit(l) | Tok::Quoted(l) => out.push_str(l),
+            Tok::AmPm => out.push_str(if pm { "PM" } else { "AM" }),
+            Tok::Date('y', n) => {
+                if *n <= 2 {
+                    out.push_str(&format!("{:02}", y.rem_euclid(100)))
+                } else {
+                    out.push_str(&format!("{y:04}"))
+                }
+            }
+            Tok::Date('d', n) => match n {
+                1 => out.push_str(&d.to_string()),
+                2 => out.push_str(&format!("{d:02}")),
+                3 => out.push_str(&DAYS[weekday(serial) as usize][..2]),
+                _ => out.push_str(DAYS[weekday(serial) as usize]),
+            },
+            Tok::Date('m', n) => {
+                // m means minutes right after an hour or right before seconds.
+                let prev = toks[..i].iter().rev().find(|t| matches!(t, Tok::Date(..)));
+                let next = toks[i + 1..].iter().find(|t| matches!(t, Tok::Date(..)));
+                let minutes =
+                    matches!(prev, Some(Tok::Date('h', _))) || matches!(next, Some(Tok::Date('s', _)));
+                if minutes {
+                    out.push_str(&if *n >= 2 { format!("{mi:02}") } else { mi.to_string() });
+                } else {
+                    match n {
+                        1 => out.push_str(&mo.to_string()),
+                        2 => out.push_str(&format!("{mo:02}")),
+                        3 => out.push_str(MONTHS_SHORT[mo as usize - 1]),
+                        _ => out.push_str(MONTHS[mo as usize - 1]),
+                    }
+                }
+            }
+            Tok::Date('h', n) => out.push_str(&if *n >= 2 { format!("{h:02}") } else { h.to_string() }),
+            Tok::Date('s', n) => out.push_str(&if *n >= 2 { format!("{s:02}") } else { s.to_string() }),
+            Tok::Date(..) => {}
+        }
+    }
+    out
+}
+
+fn format_number_section(n: f64, section: &str) -> String {
+    // The numeric pattern runs from the first to the last digit placeholder.
+    let toks = literal_tokens(section, false);
+    let mut prefix = String::new();
+    let mut pattern = String::new();
+    let mut suffix = String::new();
+    for tok in &toks {
+        let l = match tok {
+            Tok::Quoted(q) => {
+                if pattern.is_empty() {
+                    prefix.push_str(q)
+                } else {
+                    suffix.push_str(q)
+                }
+                continue;
+            }
+            Tok::Lit(l) => l,
+            _ => continue,
+        };
+        for c in l.chars() {
+            let placeholder = "0#?.,".contains(c);
+            if placeholder && suffix.is_empty() {
+                pattern.push(c);
+            } else if pattern.is_empty() {
+                prefix.push(c);
+            } else {
+                suffix.push(c);
+            }
+        }
+    }
+    let percent = prefix.contains('%') || suffix.contains('%');
+    let n = if percent { n * 100.0 } else { n };
+    if pattern.is_empty() {
+        return format!("{prefix}{suffix}");
+    }
+    let (int_pat, frac_pat) = pattern.split_once('.').unwrap_or((&pattern, ""));
+    let decimals = frac_pat.chars().filter(|c| matches!(c, '0' | '#' | '?')).count();
+    let min_decimals = frac_pat.chars().filter(|&c| c == '0').count();
+    let min_int = int_pat.chars().filter(|&c| c == '0').count();
+    let group = int_pat.contains(',');
+    let rounded = format!("{:.*}", decimals, n.abs());
+    let (int_digits, frac_digits) = rounded.split_once('.').unwrap_or((&rounded, ""));
+    let mut frac = frac_digits.to_string();
+    while frac.len() > min_decimals && frac.ends_with('0') {
+        frac.pop();
+    }
+    let int_digits = int_digits.trim_start_matches('0');
+    let int_digits = if int_digits.len() < min_int {
+        format!("{}{int_digits}", "0".repeat(min_int - int_digits.len()))
+    } else {
+        int_digits.to_string()
+    };
+    let mut int = String::new();
+    for (i, c) in int_digits.chars().enumerate() {
+        if group && i > 0 && (int_digits.len() - i) % 3 == 0 {
+            int.push(',');
+        }
+        int.push(c);
+    }
+    let mut out = prefix;
+    if n < 0.0 && (int_digits.chars().chain(frac.chars()).any(|c| c != '0')) {
+        out.insert(0, '-');
+    }
+    out.push_str(&int);
+    if !frac.is_empty() {
+        out.push('.');
+        out.push_str(&frac);
+    }
+    out.push_str(&suffix);
+    out
+}
+
+/// Formats a number with an Excel format code, as the TEXT function does:
+/// `0.00`, `#,##0`, `0%`, `"€" 0.00`, `dd-mm-yyyy`, `dddd d mmmm`, `hh:mm`,
+/// with up to three sections (positive;negative;zero).
+pub fn format_with_code(n: f64, code: &str) -> String {
+    let parts = sections(code);
+    let (section, value) = match parts.len() {
+        1 => (parts[0], n),
+        2 if n < 0.0 => (parts[1], -n),
+        _ if n < 0.0 && parts.len() >= 2 => (parts[1], -n),
+        3.. if n == 0.0 => (parts[2], n),
+        _ => (parts[0], n),
+    };
+    if section.eq_ignore_ascii_case("general") || section.is_empty() {
+        return format_general(value);
+    }
+    let lower = section.to_ascii_lowercase();
+    let unquoted: String = {
+        let mut q = false;
+        lower
+            .chars()
+            .filter(|&c| {
+                if c == '"' {
+                    q = !q;
+                }
+                !q
+            })
+            .collect()
+    };
+    if is_date_code(&lower) || unquoted.contains('h') || unquoted.contains('s') {
+        format_date_section(value, section)
+    } else {
+        format_number_section(value, section)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +511,30 @@ mod tests {
         assert_eq!(date_to_serial(1900, 3, 1), Some(61.0));
         assert_eq!(date_to_serial(2023, 2, 29), None);
         assert_eq!(format_value(&Value::Number(46317.0), NumFmt::Date), "22-10-2026");
+    }
+
+    #[test]
+    fn excel_format_codes_for_text() {
+        assert_eq!(format_with_code(1234.567, "0.00"), "1234.57");
+        assert_eq!(format_with_code(1234.567, "#,##0"), "1,235");
+        assert_eq!(format_with_code(1234.5, "#,##0.00"), "1,234.50");
+        assert_eq!(format_with_code(0.256, "0%"), "26%");
+        assert_eq!(format_with_code(0.256, "0.0%"), "25.6%");
+        assert_eq!(format_with_code(7.0, "000"), "007");
+        assert_eq!(format_with_code(7.0, "\"Nr 0\"0"), "Nr 07");
+        assert_eq!(format_with_code(3.5, "\"€\" 0.00"), "€ 3.50");
+        assert_eq!(format_with_code(-5.0, "0;(0)"), "(5)");
+        assert_eq!(format_with_code(0.0, "0;-0;\"nul\""), "nul");
+        assert_eq!(format_with_code(1.5, "#.##"), "1.5");
+        assert_eq!(format_with_code(-1.234, "0.0"), "-1.2");
+        assert_eq!(format_with_code(46317.0, "dd-mm-yyyy"), "22-10-2026");
+        assert_eq!(format_with_code(46317.0, "dddd d mmmm yyyy"), "donderdag 22 oktober 2026");
+        assert_eq!(format_with_code(46317.0, "ddd d mmm yy"), "do 22 okt 26");
+        assert_eq!(format_with_code(46317.75, "hh:mm"), "18:00");
+        assert_eq!(format_with_code(46317.75, "h:mm AM/PM"), "6:00 PM");
+        assert_eq!(format_with_code(46317.5 + 61.0 / 86400.0, "hh:mm:ss"), "12:01:01");
+        assert_eq!(format_with_code(46317.0, "yyyy"), "2026");
+        assert_eq!(weekday(46317.0), 4);
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub struct Workbook {
     index: Vec<u32>,
     next_id: SheetId,
     deps: DepGraph,
+    /// Formulas using TODAY or NOW; recalculated with every change.
+    volatile: FxHashSet<Node>,
     /// Formulas evaluated by the most recent recalculation.
     last_recalc: usize,
 }
@@ -52,8 +54,14 @@ impl Workbook {
             sheet.id = i as SheetId;
         }
         let next_id = sheets.len() as SheetId;
-        let mut book =
-            Workbook { sheets, index: Vec::new(), next_id, deps: DepGraph::default(), last_recalc: 0 };
+        let mut book = Workbook {
+            sheets,
+            index: Vec::new(),
+            next_id,
+            deps: DepGraph::default(),
+            volatile: FxHashSet::default(),
+            last_recalc: 0,
+        };
         book.rebuild();
         book
     }
@@ -139,8 +147,16 @@ impl Workbook {
                 let sheets = &self.sheets;
                 expr.precedents(id, &|name| find_in(sheets, name), &mut precedents);
                 self.deps.set((id, at), precedents);
+                if expr.is_volatile() {
+                    self.volatile.insert((id, at));
+                } else {
+                    self.volatile.remove(&(id, at));
+                }
             }
-            _ => self.deps.remove((id, at)),
+            _ => {
+                self.deps.remove((id, at));
+                self.volatile.remove(&(id, at));
+            }
         }
         self.sheets[index].put(at, state);
     }
@@ -246,6 +262,7 @@ impl Workbook {
             self.index[id] = i as u32;
         }
         self.deps.clear();
+        self.volatile.clear();
         let sheets = &self.sheets;
         let resolve = |name: &str| find_in(sheets, name);
         for sheet in sheets {
@@ -254,6 +271,9 @@ impl Workbook {
                     let mut precedents = Vec::new();
                     expr.precedents(sheet.id, &resolve, &mut precedents);
                     self.deps.set((sheet.id, at), precedents);
+                    if expr.is_volatile() {
+                        self.volatile.insert((sheet.id, at));
+                    }
                 }
             }
         }
@@ -274,8 +294,9 @@ impl Workbook {
             self.last_recalc = 0;
             return;
         }
-        let mut dirty = FxHashSet::default();
-        let mut queue = Vec::new();
+        // Volatile formulas (TODAY, NOW) and what reads them refresh with every change.
+        let mut queue: Vec<Node> = self.volatile.iter().copied().collect();
+        let mut dirty: FxHashSet<Node> = queue.iter().copied().collect();
         for &c in changed {
             if self.deps.is_formula(c) {
                 dirty.insert(c);
@@ -416,6 +437,15 @@ impl CellSource for Workbook {
 
     fn value(&self, sheet: SheetId, at: CellRef) -> &Value {
         self.sheet_by_id(sheet).map_or(&EMPTY, |s| s.value(at))
+    }
+
+    fn for_each_cell(&self, sheet: SheetId, range: Range, f: &mut dyn FnMut(CellRef, &Value) -> bool) {
+        let Some(sheet) = self.sheet_by_id(sheet) else { return };
+        for (at, cell) in sheet.cells_in(range) {
+            if !cell.value.is_empty() && !f(at, &cell.value) {
+                return;
+            }
+        }
     }
 
     fn for_each_value(&self, sheet: SheetId, range: Range, f: &mut dyn FnMut(&Value) -> bool) {
