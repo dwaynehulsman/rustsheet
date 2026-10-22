@@ -6,13 +6,13 @@ use egui::{
     Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 use rustsheet_core::format::{Align as CellAlign, format_value};
-use rustsheet_core::sheet::{DEFAULT_COL_WIDTH, MIN_COL_WIDTH};
+use rustsheet_core::sheet::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, MIN_COL_WIDTH, MIN_ROW_HEIGHT};
 use rustsheet_core::{CellRef, MAX_COLS, MAX_ROWS, Range, Value, addr::col_name};
 
 use crate::menu::Command;
 use crate::view::{Env, Selection, SheetView, take_edit_keys, take_key};
 
-pub const ROW_H: f32 = 22.0;
+pub const ROW_H: f32 = DEFAULT_ROW_HEIGHT;
 pub const HEADER_H: f32 = 22.0;
 pub const CELL_FONT: f32 = 13.0;
 const PAD: f32 = 5.0;
@@ -86,6 +86,12 @@ pub enum Drag {
         start_width: f32,
         grab_x: f32,
     },
+    ResizeRow {
+        row: u32,
+        original: Option<f32>,
+        start_height: f32,
+        grab_y: f32,
+    },
     ScrollV {
         grab: f32,
     },
@@ -107,12 +113,33 @@ struct Geometry {
     corner: Rect,
     /// Visible columns: (index, left x, width).
     cols: Vec<(u32, f32, f32)>,
-    /// Visible rows: (index, top y).
-    rows: Vec<(u32, f32)>,
+    /// Visible rows: (index, top y, height); hidden rows are left out.
+    rows: Vec<(u32, f32, f32)>,
     vbar: Rect,
     hbar: Rect,
-    /// Scrollable extents in points.
+    /// Scrollable extents in points (below and right of frozen panes).
     extent: (f64, f64),
+    /// Frozen rows and columns, and where the scrolled part starts on screen.
+    frozen: (u32, u32),
+    split: Pos2,
+}
+
+impl Geometry {
+    /// The part of the cell area where cells of a frozen or scrolled row and
+    /// column are drawn, so scrolled cells never cover frozen ones.
+    fn band(&self, row: u32, col: u32) -> Rect {
+        let (y0, y1) = if row < self.frozen.0 {
+            (self.cells.top(), self.split.y)
+        } else {
+            (self.split.y, self.cells.bottom())
+        };
+        let (x0, x1) = if col < self.frozen.1 {
+            (self.cells.left(), self.split.x)
+        } else {
+            (self.split.x, self.cells.right())
+        };
+        Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
+    }
 }
 
 enum Zone {
@@ -120,6 +147,7 @@ enum Zone {
     /// The small square at the bottom right of the selection.
     FillHandle,
     ColBorder(u32),
+    RowBorder(u32),
     ColHeader(u32),
     RowHeader(u32),
     Cell(CellRef),
@@ -128,8 +156,39 @@ enum Zone {
 }
 
 impl SheetView {
+    /// Height and width of the frozen rows and columns.
+    fn frozen_size(&self) -> (f64, f64) {
+        let sheet = self.sheet();
+        let (fr, fc) = sheet.freeze();
+        (sheet.row_y(fr), sheet.col_x(fc))
+    }
+
+    /// Screen y of the top of `row`, given the cell area's top.
+    fn screen_y(&self, top: f32, row: u32) -> f64 {
+        let sheet = self.sheet();
+        let fr = sheet.freeze().0;
+        if row < fr {
+            f64::from(top) + sheet.row_y(row)
+        } else {
+            f64::from(top) + sheet.row_y(fr) + sheet.row_y(row) - sheet.row_y(fr) - self.scroll.1
+        }
+    }
+
+    /// Screen x of the left of `col`, given the cell area's left.
+    fn screen_x(&self, left: f32, col: u32) -> f64 {
+        let sheet = self.sheet();
+        let fc = sheet.freeze().1;
+        if col < fc {
+            f64::from(left) + sheet.col_x(col)
+        } else {
+            f64::from(left) + sheet.col_x(fc) + sheet.col_x(col) - sheet.col_x(fc) - self.scroll.0
+        }
+    }
+
     fn row_header_width(&self) -> f32 {
-        let last = ((self.scroll.1 / f64::from(ROW_H)) as u32 + 80).min(MAX_ROWS);
+        let sheet = self.sheet();
+        let first = sheet.row_at_y(sheet.row_y(sheet.freeze().0) + self.scroll.1);
+        let last = (first + 80).min(MAX_ROWS);
         let digits = last.to_string().len() as f32;
         (digits * 7.6 + 16.0).max(40.0)
     }
@@ -155,22 +214,49 @@ impl SheetView {
         let row_header =
             Rect::from_min_max(pos2(rect.left(), cells.top()), pos2(cells.left(), rect.bottom()));
         let corner = Rect::from_min_max(rect.min, pos2(cells.left(), cells.top()));
+        let (fr, fc) = sheet.freeze();
+        let (fh, fw) = self.frozen_size();
+        let split = pos2(
+            (f64::from(cells.left()) + fw).min(f64::from(cells.right())) as f32,
+            (f64::from(cells.top()) + fh).min(f64::from(cells.bottom())) as f32,
+        );
 
         let mut cols = Vec::new();
-        let mut col = sheet.col_at_x(self.scroll.0);
-        let mut x = cells.left() + (sheet.col_x(col) - self.scroll.0) as f32;
+        for col in 0..fc {
+            let x = self.screen_x(cells.left(), col) as f32;
+            if x >= cells.right() {
+                break;
+            }
+            cols.push((col, x, sheet.col_width(col)));
+        }
+        let mut col = sheet.col_at_x(sheet.col_x(fc) + self.scroll.0).max(fc);
+        let mut x = self.screen_x(cells.left(), col) as f32;
         while x < cells.right() && col < MAX_COLS {
             let w = sheet.col_width(col);
             cols.push((col, x, w));
             x += w;
             col += 1;
         }
+
         let mut rows = Vec::new();
-        let mut row = (self.scroll.1 / f64::from(ROW_H)).floor() as u32;
-        let mut y = cells.top() + (f64::from(row) * f64::from(ROW_H) - self.scroll.1) as f32;
+        for row in 0..fr {
+            let h = sheet.row_height(row);
+            let y = self.screen_y(cells.top(), row) as f32;
+            if y >= cells.bottom() {
+                break;
+            }
+            if h > 0.0 {
+                rows.push((row, y, h));
+            }
+        }
+        let mut row = sheet.row_at_y(sheet.row_y(fr) + self.scroll.1).max(fr);
+        let mut y = self.screen_y(cells.top(), row) as f32;
         while y < cells.bottom() && row < MAX_ROWS {
-            rows.push((row, y));
-            y += ROW_H;
+            let h = sheet.row_height(row);
+            if h > 0.0 {
+                rows.push((row, y, h));
+            }
+            y += h;
             row += 1;
         }
 
@@ -181,27 +267,44 @@ impl SheetView {
         let last_col = cols.last().map_or(0, |c| c.0);
         let extent_rows = (used.0 + 100).max(last_row + 1).min(MAX_ROWS);
         let extent_cols = (used.1 + 10).max(last_col + 1).min(MAX_COLS);
-        let extent = (sheet.col_x(extent_cols), f64::from(extent_rows) * f64::from(ROW_H));
+        let extent = (sheet.col_x(extent_cols) - fw, sheet.row_y(extent_rows) - fh);
 
         let vbar = Rect::from_min_max(
-            pos2(cells.right() - SCROLLBAR, cells.top()),
+            pos2(cells.right() - SCROLLBAR, split.y),
             pos2(cells.right(), cells.bottom() - SCROLLBAR),
         );
         let hbar = Rect::from_min_max(
-            pos2(cells.left(), cells.bottom() - SCROLLBAR),
+            pos2(split.x, cells.bottom() - SCROLLBAR),
             pos2(cells.right() - SCROLLBAR, cells.bottom()),
         );
-        Geometry { cells, col_header, row_header, corner, cols, rows, vbar, hbar, extent }
+        Geometry {
+            cells,
+            col_header,
+            row_header,
+            corner,
+            cols,
+            rows,
+            vbar,
+            hbar,
+            extent,
+            frozen: (fr, fc),
+            split,
+        }
+    }
+
+    /// Size of the scrolled part of the cell area.
+    fn scroll_view(&self, g: &Geometry) -> (f64, f64) {
+        (
+            f64::from(g.cells.right() - g.split.x - SCROLLBAR).max(1.0),
+            f64::from(g.cells.bottom() - g.split.y - SCROLLBAR).max(1.0),
+        )
     }
 
     fn max_scroll(&self, g: &Geometry) -> (f64, f64) {
         let sheet = self.sheet();
-        let view_w = f64::from(g.cells.width() - SCROLLBAR);
-        let view_h = f64::from(g.cells.height() - SCROLLBAR);
-        (
-            (sheet.col_x(MAX_COLS) - view_w).max(0.0),
-            (f64::from(MAX_ROWS) * f64::from(ROW_H) - view_h).max(0.0),
-        )
+        let (fh, fw) = self.frozen_size();
+        let (view_w, view_h) = self.scroll_view(g);
+        ((sheet.col_x(MAX_COLS) - fw - view_w).max(0.0), (sheet.row_y(MAX_ROWS) - fh - view_h).max(0.0))
     }
 
     fn clamp_scroll(&mut self, g: &Geometry) {
@@ -210,31 +313,50 @@ impl SheetView {
         self.scroll.1 = self.scroll.1.clamp(0.0, my);
     }
 
-    /// Scrolls the minimum needed to show `at`.
+    /// Scrolls the minimum needed to show `at` (frozen cells are always shown).
     fn reveal(&mut self, at: CellRef, g: &Geometry) {
+        let (fr, fc) = g.frozen;
+        let (fh, fw) = self.frozen_size();
+        let (view_w, view_h) = self.scroll_view(g);
         let sheet = self.sheet();
-        let view_w = f64::from(g.cells.width() - SCROLLBAR);
-        let view_h = f64::from(g.cells.height() - SCROLLBAR);
-        let (x0, x1) = (sheet.col_x(at.col), sheet.col_x(at.col) + f64::from(sheet.col_width(at.col)));
-        let (y0, y1) = (f64::from(at.row) * f64::from(ROW_H), f64::from(at.row + 1) * f64::from(ROW_H));
-        if x0 < self.scroll.0 {
-            self.scroll.0 = x0;
-        } else if x1 > self.scroll.0 + view_w {
-            self.scroll.0 = (x1 - view_w).min(x0);
+        let x0 = sheet.col_x(at.col) - fw;
+        let x1 = x0 + f64::from(sheet.col_width(at.col));
+        let y0 = sheet.row_y(at.row) - fh;
+        let y1 = y0 + f64::from(sheet.row_height(at.row));
+        if at.col >= fc {
+            if x0 < self.scroll.0 {
+                self.scroll.0 = x0;
+            } else if x1 > self.scroll.0 + view_w {
+                self.scroll.0 = (x1 - view_w).min(x0);
+            }
         }
-        if y0 < self.scroll.1 {
-            self.scroll.1 = y0;
-        } else if y1 > self.scroll.1 + view_h {
-            self.scroll.1 = y1 - view_h;
+        if at.row >= fr {
+            if y0 < self.scroll.1 {
+                self.scroll.1 = y0;
+            } else if y1 > self.scroll.1 + view_h {
+                self.scroll.1 = y1 - view_h;
+            }
         }
     }
 
     /// Cell under a screen position, clamped to the grid.
     fn cell_at(&self, g: &Geometry, pos: Pos2) -> CellRef {
-        let x = self.scroll.0 + f64::from(pos.x - g.cells.left());
-        let y = self.scroll.1 + f64::from(pos.y - g.cells.top());
-        let row = (y / f64::from(ROW_H)).floor().clamp(0.0, f64::from(MAX_ROWS - 1)) as u32;
-        CellRef::new(row, self.sheet().col_at_x(x.max(0.0)))
+        let sheet = self.sheet();
+        let (fr, fc) = g.frozen;
+        let (fh, fw) = self.frozen_size();
+        let dy = f64::from(pos.y - g.cells.top());
+        let row = if pos.y < g.split.y {
+            sheet.row_at_y(dy).min(fr.saturating_sub(1))
+        } else {
+            sheet.row_at_y(sheet.row_y(fr) + self.scroll.1 + dy - fh).max(fr)
+        };
+        let dx = f64::from(pos.x - g.cells.left());
+        let col = if pos.x < g.split.x {
+            sheet.col_at_x(dx).min(fc.saturating_sub(1))
+        } else {
+            sheet.col_at_x(sheet.col_x(fc) + self.scroll.0 + dx - fw).max(fc)
+        };
+        CellRef::new(row, col)
     }
 
     /// Screen rectangle of a range, clamped near the visible area so huge
@@ -242,15 +364,36 @@ impl SheetView {
     fn range_rect(&self, g: &Geometry, r: Range) -> Rect {
         let sheet = self.sheet();
         let margin = 8.0;
-        let left = f64::from(g.cells.left());
-        let top = f64::from(g.cells.top());
-        let clamp_x = |x: f64| x.clamp(left - margin, f64::from(g.cells.right()) + margin) as f32;
-        let clamp_y = |y: f64| y.clamp(top - margin, f64::from(g.cells.bottom()) + margin) as f32;
-        let x0 = left + sheet.col_x(r.start.col) - self.scroll.0;
-        let x1 = left + sheet.col_x(r.end.col) + f64::from(sheet.col_width(r.end.col)) - self.scroll.0;
-        let y0 = top + f64::from(r.start.row) * f64::from(ROW_H) - self.scroll.1;
-        let y1 = top + f64::from(r.end.row + 1) * f64::from(ROW_H) - self.scroll.1;
+        let clamp_x =
+            |x: f64| x.clamp(f64::from(g.cells.left()) - margin, f64::from(g.cells.right()) + margin) as f32;
+        let clamp_y =
+            |y: f64| y.clamp(f64::from(g.cells.top()) - margin, f64::from(g.cells.bottom()) + margin) as f32;
+        let x0 = self.screen_x(g.cells.left(), r.start.col);
+        let x1 = self.screen_x(g.cells.left(), r.end.col) + f64::from(sheet.col_width(r.end.col));
+        let y0 = self.screen_y(g.cells.top(), r.start.row);
+        let y1 = self.screen_y(g.cells.top(), r.end.row) + f64::from(sheet.row_height(r.end.row));
         Rect::from_min_max(pos2(clamp_x(x0), clamp_y(y0)), pos2(clamp_x(x1), clamp_y(y1)))
+    }
+
+    /// Where drawing for range `r` may appear: a range entirely in the
+    /// scrolled part must not cover the frozen panes, and the other way round.
+    fn range_clip(&self, g: &Geometry, r: Range) -> Rect {
+        let (fr, fc) = g.frozen;
+        let (y0, y1) = if r.start.row >= fr {
+            (g.split.y, g.cells.bottom())
+        } else if r.end.row < fr {
+            (g.cells.top(), g.split.y)
+        } else {
+            (g.cells.top(), g.cells.bottom())
+        };
+        let (x0, x1) = if r.start.col >= fc {
+            (g.split.x, g.cells.right())
+        } else if r.end.col < fc {
+            (g.cells.left(), g.split.x)
+        } else {
+            (g.cells.left(), g.cells.right())
+        };
+        Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
     }
 
     fn zone(&self, g: &Geometry, pos: Pos2) -> Option<Zone> {
@@ -266,6 +409,11 @@ impl SheetView {
             return Some(Zone::ColHeader(self.cell_at(g, pos).col));
         }
         if g.row_header.contains(pos) {
+            for &(row, y, h) in &g.rows {
+                if (pos.y - (y + h)).abs() <= RESIZE_GRAB.min(h / 3.0) {
+                    return Some(Zone::RowBorder(row));
+                }
+            }
             return Some(Zone::RowHeader(self.cell_at(g, pos).row));
         }
         if g.vbar.contains(pos) {
@@ -444,6 +592,9 @@ impl SheetView {
             (Drag::Resize { .. }, _) | (Drag::None, Some(Zone::ColBorder(_))) => {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal)
             }
+            (Drag::ResizeRow { .. }, _) | (Drag::None, Some(Zone::RowBorder(_))) => {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical)
+            }
             (Drag::None, Some(Zone::FillHandle)) | (Drag::Fill { .. }, _) => {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair)
             }
@@ -490,6 +641,12 @@ impl SheetView {
             self.drag_to(pos, g);
         }
         if released {
+            if let Drag::ResizeRow { row, original, .. } = self.drag {
+                let height = self.sheet().custom_row_height(row);
+                if height != original {
+                    self.set_row_height(row, original, height);
+                }
+            }
             if let Drag::Resize { col, original, .. } = self.drag {
                 let width = self.sheet().custom_col_width(col);
                 if width != original {
@@ -513,6 +670,12 @@ impl SheetView {
                     self.begin_edit(None, false)
                 }
                 Some(Zone::ColBorder(col)) => self.autofit(col),
+                Some(Zone::RowBorder(row)) => {
+                    let original = self.sheet().custom_row_height(row);
+                    if original.is_some() {
+                        self.set_row_height(row, original, None);
+                    }
+                }
                 _ => {}
             }
         }
@@ -577,7 +740,7 @@ impl SheetView {
         let pointing = matches!(zone, Zone::Cell(at) if self.wants_reference()
             && self.edit.as_ref().is_some_and(|e| e.cell != at || e.sheet != self.sheet));
         if !pointing
-            && !matches!(zone, Zone::VBar | Zone::HBar | Zone::ColBorder(_))
+            && !matches!(zone, Zone::VBar | Zone::HBar | Zone::ColBorder(_) | Zone::RowBorder(_))
             && self.edit.is_some()
             && !self.commit_edit()
         {
@@ -586,6 +749,15 @@ impl SheetView {
         match zone {
             Zone::Corner => {
                 self.sel = Selection::span(CellRef::default(), CellRef::new(MAX_ROWS - 1, MAX_COLS - 1));
+            }
+            Zone::RowBorder(row) => {
+                let height = self.sheet().row_height(row);
+                self.drag = Drag::ResizeRow {
+                    row,
+                    original: self.sheet().custom_row_height(row),
+                    start_height: height,
+                    grab_y: pos.y,
+                };
             }
             Zone::ColBorder(col) => {
                 let width = self.sheet().col_width(col);
@@ -700,6 +872,10 @@ impl SheetView {
                 let width = (start_width + pos.x - grab_x).max(MIN_COL_WIDTH);
                 self.preview_column_width(col, Some(width));
             }
+            Drag::ResizeRow { row, start_height, grab_y, .. } => {
+                let height = (start_height + pos.y - grab_y).max(MIN_ROW_HEIGHT);
+                self.preview_row_height(row, Some(height));
+            }
             Drag::ScrollV { grab } => {
                 let (thumb, range) = self.thumb(g, true);
                 let frac = (pos.y - grab - g.vbar.top()) / (g.vbar.height() - thumb.height()).max(1.0);
@@ -761,16 +937,23 @@ impl SheetView {
         let snap = |v: f32| (v * ppp).round() / ppp - 0.5 / ppp;
         let sheet = self.sheet();
         let cells_painter = painter.with_clip_rect(g.cells);
+        let (fr, fc) = g.frozen;
 
         cells_painter.rect_filled(g.cells, 0.0, p.background);
 
-        // Gridlines.
-        for &(_, x, w) in &g.cols {
+        // Gridlines; scrolled lines never cross the frozen panes.
+        for &(col, x, w) in &g.cols {
             let x = snap(x + w);
+            if col >= fc && x < g.split.x {
+                continue;
+            }
             cells_painter.line_segment([pos2(x, g.cells.top()), pos2(x, g.cells.bottom())], hair);
         }
-        for &(_, y) in &g.rows {
-            let y = snap(y + ROW_H);
+        for &(row, y, h) in &g.rows {
+            let y = snap(y + h);
+            if row >= fr && y < g.split.y {
+                continue;
+            }
             cells_painter.line_segment([pos2(g.cells.left(), y), pos2(g.cells.right(), y)], hair);
         }
 
@@ -778,10 +961,11 @@ impl SheetView {
         let fill_of = |at: CellRef| {
             sheet.cell(at).and_then(|c| c.format.fill).map(|f| Color32::from_rgb(f.0, f.1, f.2))
         };
-        for &(row, y) in &g.rows {
+        for &(row, y, h) in &g.rows {
             for &(col, x, w) in &g.cols {
                 if let Some(fill) = fill_of(CellRef::new(row, col)) {
-                    cells_painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(w, ROW_H)), 0.0, fill);
+                    let r = Rect::from_min_size(pos2(x, y), vec2(w, h));
+                    cells_painter.with_clip_rect(g.band(row, col)).rect_filled(r, 0.0, fill);
                 }
             }
         }
@@ -789,23 +973,29 @@ impl SheetView {
         // Selection tint, with the active cell left clear like Excel.
         let sel = self.sel.range();
         let sel_rect = self.range_rect(g, sel);
+        let sel_painter = cells_painter.with_clip_rect(self.range_clip(g, sel).intersect(g.cells));
         if sel.len() > 1 {
-            cells_painter.rect_filled(sel_rect, 0.0, p.selection);
+            sel_painter.rect_filled(sel_rect, 0.0, p.selection);
             let active = self.range_rect(g, Range::single(self.sel.active));
             let under = fill_of(self.sel.active).unwrap_or(p.background);
-            cells_painter.rect_filled(active.shrink(1.0), 0.0, under);
+            cells_painter.with_clip_rect(g.band(self.sel.active.row, self.sel.active.col)).rect_filled(
+                active.shrink(1.0),
+                0.0,
+                under,
+            );
         }
 
         // Cell text.
         let here = |e: &&crate::view::Edit| e.sheet == self.sheet;
         let editing_cell = self.edit.as_ref().filter(here).filter(|e| !e.in_bar).map(|e| e.cell);
         let last_col = g.cols.last().map_or(0, |c| c.0);
-        for &(row, y) in &g.rows {
+        for &(row, y, h) in &g.rows {
             for (ci, &(col, x, w)) in g.cols.iter().enumerate() {
                 let at = CellRef::new(row, col);
                 if Some(at) == editing_cell {
                     continue;
                 }
+                let band = g.band(row, col);
                 let bar_text = self
                     .edit
                     .as_ref()
@@ -815,10 +1005,9 @@ impl SheetView {
                 let Some(cell) = sheet.cell(at) else {
                     if let Some(text) = bar_text {
                         let galley = painter.layout_no_wrap(text, FontId::proportional(CELL_FONT), p.text);
-                        let pos = pos2(x + PAD, y + (ROW_H - galley.size().y) / 2.0);
-                        cells_painter
-                            .with_clip_rect(Rect::from_min_size(pos2(x, y), vec2(w, ROW_H)))
-                            .galley(pos, galley, p.text);
+                        let pos = pos2(x + PAD, y + (h - galley.size().y) / 2.0);
+                        let clip = Rect::from_min_size(pos2(x, y), vec2(w, h)).intersect(band);
+                        cells_painter.with_clip_rect(clip).galley(pos, galley, p.text);
                     }
                     continue;
                 };
@@ -847,61 +1036,95 @@ impl SheetView {
                     CellAlign::Center => x + (w - gw) / 2.0,
                     _ => x + PAD,
                 };
-                let cell_rect = Rect::from_min_size(pos2(x, y), vec2(w, ROW_H));
+                let cell_rect = Rect::from_min_size(pos2(x, y), vec2(w, h));
                 let mut clip = cell_rect;
                 // Left-aligned text spills into empty cells on the right.
                 if matches!(align, CellAlign::Left | CellAlign::General) && tx + gw > x + w {
                     let mut right = x + w;
                     for &(next_col, nx, nw) in &g.cols[ci + 1..] {
-                        if right >= tx + gw + PAD || next_col > last_col {
+                        if right >= tx + gw + PAD || next_col > last_col || (col < fc) != (next_col < fc) {
                             break;
                         }
-                        if sheet.cell(CellRef::new(row, next_col)).is_some_and(|c| !c.value.is_empty()) {
+                        let next = sheet.cell(CellRef::new(row, next_col));
+                        if next.is_some_and(|c| !c.value.is_empty() || c.format.fill.is_some()) {
                             break;
                         }
                         right = nx + nw;
                     }
                     if right > x + w {
                         clip.max.x = right;
-                        let cover = Rect::from_min_max(
-                            pos2(x + w - 1.0, y + 0.5),
-                            pos2(right - 1.0, y + ROW_H - 1.0),
-                        );
-                        cells_painter.rect_filled(cover, 0.0, p.background);
+                        let cover =
+                            Rect::from_min_max(pos2(x + w - 1.0, y + 0.5), pos2(right - 1.0, y + h - 1.0));
+                        cells_painter.with_clip_rect(band).rect_filled(cover, 0.0, p.background);
                         if sel.len() > 1 {
-                            cells_painter.with_clip_rect(sel_rect).rect_filled(cover, 0.0, p.selection);
+                            cells_painter.with_clip_rect(sel_rect.intersect(band)).rect_filled(
+                                cover,
+                                0.0,
+                                p.selection,
+                            );
                         }
                     }
                 }
-                let pos = pos2(tx, y + (ROW_H - galley.size().y) / 2.0);
-                cells_painter.with_clip_rect(clip.intersect(g.cells)).galley(pos, galley, text_color);
+                let pos = pos2(tx, y + (h - galley.size().y) / 2.0);
+                cells_painter.with_clip_rect(clip.intersect(band)).galley(pos, galley, text_color);
             }
+        }
+
+        // Lines where the panes are frozen.
+        let freeze_line = Stroke::new(1.0, p.header_line);
+        if fr > 0 {
+            cells_painter.line_segment(
+                [pos2(g.cells.left(), g.split.y), pos2(g.cells.right(), g.split.y)],
+                freeze_line,
+            );
+        }
+        if fc > 0 {
+            cells_painter.line_segment(
+                [pos2(g.split.x, g.cells.top()), pos2(g.split.x, g.cells.bottom())],
+                freeze_line,
+            );
         }
 
         // Selection border and active cell.
         let border = Stroke::new(2.0, p.accent);
-        cells_painter.rect_stroke(sel_rect, 0.0, border, StrokeKind::Inside);
+        sel_painter.rect_stroke(sel_rect, 0.0, border, StrokeKind::Inside);
         if sel.len() > 1 {
             let active = self.range_rect(g, Range::single(self.sel.active));
-            cells_painter.rect_stroke(active, 0.0, Stroke::new(1.0, p.accent), StrokeKind::Inside);
+            cells_painter.with_clip_rect(g.band(self.sel.active.row, self.sel.active.col)).rect_stroke(
+                active,
+                0.0,
+                Stroke::new(1.0, p.accent),
+                StrokeKind::Inside,
+            );
         }
 
         // Fill handle, and the area a fill drag will cover.
         if let Some(handle) = self.fill_handle(g) {
-            cells_painter.rect_filled(handle, 1.0, p.accent);
-            cells_painter.rect_stroke(handle, 1.0, Stroke::new(1.0, p.background), StrokeKind::Outside);
+            sel_painter.rect_filled(handle, 1.0, p.accent);
+            sel_painter.rect_stroke(handle, 1.0, Stroke::new(1.0, p.background), StrokeKind::Outside);
         }
         if let Drag::Fill { target: Some(target) } = self.drag {
-            let r = self.range_rect(g, sel.union(&target)).shrink(1.0);
+            let all = sel.union(&target);
+            let r = self.range_rect(g, all).shrink(1.0);
             let path = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
-            cells_painter.extend(Shape::dashed_line(&path, Stroke::new(1.5, p.accent), 3.0, 3.0));
+            cells_painter.with_clip_rect(self.range_clip(g, all)).extend(Shape::dashed_line(
+                &path,
+                Stroke::new(1.5, p.accent),
+                3.0,
+                3.0,
+            ));
         }
 
         // Marching border around a pending cut or copy source.
         if let Some(cut) = env.clip.cut().filter(|c| c.window == env.window && c.sheet == self.sheet) {
             let r = self.range_rect(g, cut.range).shrink(1.0);
             let path = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
-            cells_painter.extend(Shape::dashed_line(&path, Stroke::new(1.5, p.accent), 4.0, 3.0));
+            cells_painter.with_clip_rect(self.range_clip(g, cut.range)).extend(Shape::dashed_line(
+                &path,
+                Stroke::new(1.5, p.accent),
+                4.0,
+                3.0,
+            ));
         }
 
         self.paint_headers(ui, g, p, sel, hair);
@@ -912,11 +1135,18 @@ impl SheetView {
         let painter = ui.painter();
         let font = FontId::proportional(11.5);
         let line = Stroke::new(hair.width, p.header_line);
+        let (fr, fc) = g.frozen;
 
         let hp = painter.with_clip_rect(g.col_header);
         hp.rect_filled(g.col_header, 0.0, p.header_bg);
         for &(col, x, w) in &g.cols {
             let r = Rect::from_min_size(pos2(x, g.col_header.top()), vec2(w, HEADER_H));
+            let band = if col < fc {
+                Rect::from_min_max(g.col_header.min, pos2(g.split.x, g.col_header.bottom()))
+            } else {
+                Rect::from_min_max(pos2(g.split.x, g.col_header.top()), g.col_header.max)
+            };
+            let hp = hp.with_clip_rect(band);
             let active = (sel.start.col..=sel.end.col).contains(&col);
             if active {
                 hp.rect_filled(r, 0.0, p.header_active_bg);
@@ -929,15 +1159,23 @@ impl SheetView {
 
         let rp = painter.with_clip_rect(g.row_header);
         rp.rect_filled(g.row_header, 0.0, p.header_bg);
-        for &(row, y) in &g.rows {
-            let r = Rect::from_min_size(pos2(g.row_header.left(), y), vec2(g.row_header.width(), ROW_H));
+        for &(row, y, h) in &g.rows {
+            let r = Rect::from_min_size(pos2(g.row_header.left(), y), vec2(g.row_header.width(), h));
+            let band = if row < fr {
+                Rect::from_min_max(g.row_header.min, pos2(g.row_header.right(), g.split.y))
+            } else {
+                Rect::from_min_max(pos2(g.row_header.left(), g.split.y), g.row_header.max)
+            };
+            let rp = rp.with_clip_rect(band);
             let active = (sel.start.row..=sel.end.row).contains(&row);
             if active {
                 rp.rect_filled(r, 0.0, p.header_active_bg);
             }
             let color = if active { p.header_active_text } else { p.header_text };
             rp.text(r.center(), Align2::CENTER_CENTER, (row + 1).to_string(), font.clone(), color);
-            rp.line_segment([pos2(r.left() + 4.0, r.bottom()), pos2(r.right() - 4.0, r.bottom())], line);
+            // A hidden row above shows as a double line, like Excel.
+            let stroke = if self.sheet().is_row_hidden(row + 1) { Stroke::new(2.0, p.accent) } else { line };
+            rp.line_segment([pos2(r.left() + 4.0, r.bottom()), pos2(r.right() - 4.0, r.bottom())], stroke);
         }
         rp.line_segment([g.row_header.right_top(), g.row_header.right_bottom()], line);
 
@@ -981,7 +1219,7 @@ impl SheetView {
             rect = Rect::from_min_size(g.cells.min, rect.size());
         }
         let width = (text_w + 2.0 * PAD + 12.0).max(rect.width()).min(g.cells.right() - rect.left());
-        let rect = Rect::from_min_size(rect.min, vec2(width, ROW_H));
+        let rect = Rect::from_min_size(rect.min, vec2(width, self.sheet().row_height(cell.row).max(ROW_H)));
 
         ui.painter().rect_filled(rect, 0.0, p.background);
         let edit = self.edit.as_mut().expect("editing");

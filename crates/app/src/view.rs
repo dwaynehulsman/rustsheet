@@ -387,6 +387,22 @@ impl SheetView {
             }
             Command::Delete => self.clear_selection(),
             Command::SortAsc | Command::SortDesc => self.sort(command == Command::SortDesc),
+            Command::FreezeTopRow
+            | Command::FreezeFirstCol
+            | Command::FreezeAtSelection
+            | Command::Unfreeze => {
+                let a = self.sel.active;
+                let freeze = match command {
+                    Command::FreezeTopRow => (1, 0),
+                    Command::FreezeFirstCol => (0, 1),
+                    Command::FreezeAtSelection => (a.row, a.col),
+                    _ => (0, 0),
+                };
+                self.doc
+                    .apply(Change::Freeze(self.sheet, freeze), Some(Spot { sheet: self.sheet, range: None }));
+                self.scroll = (0.0, 0.0);
+                self.scroll_into_view = true;
+            }
             Command::Find | Command::Replace => {
                 let bar = self.find.get_or_insert_with(FindBar::default);
                 bar.replacing |= command == Command::Replace;
@@ -907,6 +923,19 @@ impl SheetView {
             Change::ColWidths(self.sheet, vec![(col, width)]),
             Some(Spot { sheet: self.sheet, range: None }),
         );
+    }
+
+    pub fn set_row_height(&mut self, row: u32, original: Option<f32>, height: Option<f32>) {
+        self.doc.book.set_row_height(self.sheet, row, original);
+        self.doc.apply(
+            Change::RowHeights(self.sheet, vec![(row, height)]),
+            Some(Spot { sheet: self.sheet, range: None }),
+        );
+    }
+
+    /// Changes a row height while dragging, without an undo step.
+    pub fn preview_row_height(&mut self, row: u32, height: Option<f32>) {
+        self.doc.book.set_row_height(self.sheet, row, height);
     }
 
     /// Changes a column width while dragging, without an undo step.

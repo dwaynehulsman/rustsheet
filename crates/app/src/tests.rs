@@ -619,3 +619,52 @@ fn enter_after_tabs_returns_to_the_starting_column() {
     assert_eq!(h.state().view.sel.active, c("B3"));
     assert_eq!(shown(&h, "D2"), "c");
 }
+
+#[test]
+fn frozen_top_row_stays_while_scrolling() {
+    let mut h = harness();
+    text(&mut h, "Kop");
+    key(&mut h, Key::Enter);
+    command(&mut h, Command::FreezeTopRow);
+    assert_eq!(h.state().view.sheet().freeze(), (1, 0));
+    let top = h.state().view.cell_center(c("A1"));
+    h.state_mut().view.scroll.1 = 22.0 * 500.0;
+    h.run();
+    // Row 1 is still where it was; the row just below it is now row 502.
+    assert_eq!(h.state().view.cell_center(c("A1")), top);
+    let below = top + egui::vec2(0.0, 22.0);
+    h.hover_at(below);
+    h.event(Event::PointerButton {
+        pos: below,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    h.event(Event::PointerButton {
+        pos: below,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(h.state().view.sel.active, c("A502"));
+    command(&mut h, Command::Unfreeze);
+    assert_eq!(h.state().view.sheet().freeze(), (0, 0));
+    command(&mut h, Command::Undo);
+    assert_eq!(h.state().view.sheet().freeze(), (1, 0));
+}
+
+#[test]
+fn dragging_a_row_border_changes_its_height() {
+    let mut h = harness();
+    let a1 = h.state().view.cell_center(c("A1"));
+    let a2 = h.state().view.cell_center(c("A2"));
+    // The border between rows 1 and 2, in the row header.
+    let header_x = h.state().view.grid_rect.left() + 10.0;
+    let start = egui::pos2(header_x, (a1.y + a2.y) / 2.0);
+    drag(&mut h, start, start + egui::vec2(0.0, 30.0));
+    let height = h.state().view.sheet().custom_row_height(0).expect("custom height");
+    assert!((height - 52.0).abs() < 1.0, "{height}");
+    command(&mut h, Command::Undo);
+    assert_eq!(h.state().view.sheet().custom_row_height(0), None);
+}

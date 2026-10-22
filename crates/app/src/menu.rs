@@ -47,6 +47,10 @@ pub enum Command {
     FillRight,
     SortAsc,
     SortDesc,
+    FreezeTopRow,
+    FreezeFirstCol,
+    FreezeAtSelection,
+    Unfreeze,
     Find,
     FindNext,
     FindPrev,
@@ -91,6 +95,10 @@ impl Command {
             Command::FillRight => "fill-right".into(),
             Command::SortAsc => "sort-asc".into(),
             Command::SortDesc => "sort-desc".into(),
+            Command::FreezeTopRow => "freeze-row".into(),
+            Command::FreezeFirstCol => "freeze-col".into(),
+            Command::FreezeAtSelection => "freeze-here".into(),
+            Command::Unfreeze => "unfreeze".into(),
             Command::Find => "find".into(),
             Command::FindNext => "find-next".into(),
             Command::FindPrev => "find-prev".into(),
@@ -137,6 +145,10 @@ impl Command {
             Command::FillRight,
             Command::SortAsc,
             Command::SortDesc,
+            Command::FreezeTopRow,
+            Command::FreezeFirstCol,
+            Command::FreezeAtSelection,
+            Command::Unfreeze,
             Command::Find,
             Command::FindNext,
             Command::FindPrev,
@@ -299,6 +311,18 @@ impl AppMenu {
         )
         .expect("data menu");
 
+        let view = Submenu::with_items(
+            "Weergave",
+            true,
+            &[
+                &item("Zet bovenste rij vast", Command::FreezeTopRow, None),
+                &item("Zet eerste kolom vast", Command::FreezeFirstCol, None),
+                &item("Zet vast boven en links van selectie", Command::FreezeAtSelection, None),
+                &item("Maak vastzetten ongedaan", Command::Unfreeze, None),
+            ],
+        )
+        .expect("view menu");
+
         let window = Submenu::with_items(
             "Venster",
             true,
@@ -311,7 +335,7 @@ impl AppMenu {
         )
         .expect("window menu");
 
-        menu.append_items(&[&app, &file, &edit, &format, &data, &sheet, &window]).expect("menu bar");
+        menu.append_items(&[&app, &file, &edit, &format, &data, &view, &sheet, &window]).expect("menu bar");
         menu.init_for_nsapp();
         window.set_as_windows_menu_for_nsapp();
 
