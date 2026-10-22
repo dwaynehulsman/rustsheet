@@ -17,6 +17,11 @@ pub struct SheetStyles {
     pub cells: Vec<(CellRef, CellFormat)>,
     /// Column widths in Excel character units.
     pub col_widths: Vec<(u32, f64)>,
+    /// Custom row heights in points.
+    pub row_heights: Vec<(u32, f64)>,
+    pub hidden_rows: Vec<u32>,
+    /// Frozen (rows, columns).
+    pub freeze: (u32, u32),
 }
 
 fn attr(e: &BytesStart<'_>, name: &str) -> Option<String> {
@@ -223,6 +228,26 @@ pub fn read_styles<R: Read + Seek>(reader: R, names: &[String]) -> Vec<SheetStyl
                     if let Some(at) = attr(e, "r").and_then(|r| CellRef::parse(&r)) {
                         styles.cells.push((at, format));
                     }
+                }
+                "row" => {
+                    let Some(row) = attr(e, "r").and_then(|v| v.parse::<u32>().ok()).filter(|&r| r >= 1)
+                    else {
+                        return;
+                    };
+                    let on = |v: Option<String>| v.is_some_and(|v| v == "1" || v == "true");
+                    if on(attr(e, "customHeight"))
+                        && let Some(ht) = attr(e, "ht").and_then(|v| v.parse::<f64>().ok())
+                    {
+                        styles.row_heights.push((row - 1, ht));
+                    }
+                    if on(attr(e, "hidden")) {
+                        styles.hidden_rows.push(row - 1);
+                    }
+                }
+                "pane" if attr(e, "state").is_some_and(|s| s.starts_with("frozen")) => {
+                    let split =
+                        |name| attr(e, name).and_then(|v| v.parse::<f64>().ok()).map_or(0, |v| v as u32);
+                    styles.freeze = (split("ySplit"), split("xSplit"));
                 }
                 "col" => {
                     let custom = attr(e, "customWidth").is_some_and(|v| v == "1" || v == "true");

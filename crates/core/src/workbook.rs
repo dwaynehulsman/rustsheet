@@ -167,6 +167,32 @@ impl Workbook {
         self.sheets[index].set_col_width(col, width)
     }
 
+    /// Sets or clears a custom row height; returns the previous one.
+    pub fn set_row_height(&mut self, sheet: SheetId, row: u32, height: Option<f32>) -> Option<f32> {
+        let index = self.index_of(sheet)?;
+        self.sheets[index].set_row_height(row, height)
+    }
+
+    /// Replaces the hidden rows of a sheet; returns the previous set.
+    pub fn set_hidden_rows(
+        &mut self,
+        sheet: SheetId,
+        rows: std::collections::BTreeSet<u32>,
+    ) -> std::collections::BTreeSet<u32> {
+        match self.index_of(sheet) {
+            Some(index) => self.sheets[index].set_hidden_rows(rows),
+            None => rows,
+        }
+    }
+
+    /// Sets the frozen rows and columns; returns the previous setting.
+    pub fn set_freeze(&mut self, sheet: SheetId, rows: u32, cols: u32) -> (u32, u32) {
+        match self.index_of(sheet) {
+            Some(index) => self.sheets[index].set_freeze(rows, cols),
+            None => (rows, cols),
+        }
+    }
+
     // ----- sheets -----
 
     /// A new empty sheet with a fresh id, not yet part of the workbook.

@@ -11,6 +11,11 @@ use crate::workbook::Workbook;
 pub enum Change {
     Cells(SheetId, Vec<(CellRef, CellState)>),
     ColWidths(SheetId, Vec<(u32, Option<f32>)>),
+    RowHeights(SheetId, Vec<(u32, Option<f32>)>),
+    /// Replaces the set of hidden rows (what a filter shows).
+    HiddenRows(SheetId, std::collections::BTreeSet<u32>),
+    /// Frozen rows and columns.
+    Freeze(SheetId, (u32, u32)),
     /// Puts a sheet (with its id) back at a position.
     InsertSheet(usize, Box<Sheet>),
     RemoveSheet(SheetId),
@@ -38,7 +43,7 @@ impl Change {
     fn is_noop(&self) -> bool {
         match self {
             Change::Cells(_, c) => c.is_empty(),
-            Change::ColWidths(_, w) => w.is_empty(),
+            Change::ColWidths(_, w) | Change::RowHeights(_, w) => w.is_empty(),
             Change::Batch(parts) => parts.iter().all(Change::is_noop),
             _ => false,
         }
@@ -59,9 +64,12 @@ impl Change {
                 })?;
                 Some(Spot { sheet: *sheet, range: Some(range) })
             }
-            Change::ColWidths(sheet, _) | Change::RenameSheet(sheet, _) | Change::Lines { sheet, .. } => {
-                Some(Spot { sheet: *sheet, range: None })
-            }
+            Change::ColWidths(sheet, _)
+            | Change::RowHeights(sheet, _)
+            | Change::HiddenRows(sheet, _)
+            | Change::Freeze(sheet, _)
+            | Change::RenameSheet(sheet, _)
+            | Change::Lines { sheet, .. } => Some(Spot { sheet: *sheet, range: None }),
             Change::InsertSheet(_, sheet) => Some(Spot { sheet: sheet.id(), range: None }),
             Change::RemoveSheet(_) => None,
             // Structural parts say more about where to look than cell rewrites.
@@ -140,6 +148,23 @@ impl Document {
                     })
                     .collect(),
             ),
+            Change::RowHeights(sheet, heights) => Change::RowHeights(
+                sheet,
+                heights
+                    .into_iter()
+                    .rev()
+                    .filter_map(|(row, h)| {
+                        self.book.index_of(sheet)?;
+                        Some((row, self.book.set_row_height(sheet, row, h)))
+                    })
+                    .collect(),
+            ),
+            Change::HiddenRows(sheet, rows) => {
+                Change::HiddenRows(sheet, self.book.set_hidden_rows(sheet, rows))
+            }
+            Change::Freeze(sheet, (rows, cols)) => {
+                Change::Freeze(sheet, self.book.set_freeze(sheet, rows, cols))
+            }
             Change::InsertSheet(index, sheet) => {
                 let id = sheet.id();
                 self.book.insert_sheet(index, *sheet);
@@ -314,7 +339,22 @@ impl Document {
         let clear: Vec<(CellRef, CellState)> =
             source.cells_in(zone).map(|(c, _)| (c, CellState::default())).collect();
         let mut parts = vec![Change::Cells(sheet, clear)];
-        if !rows {
+        if rows {
+            // Heights and hiding of the deleted rows come back on undo.
+            let heights: Vec<(u32, Option<f32>)> = source
+                .row_heights()
+                .filter(|(r, _)| (at..=end).contains(r))
+                .map(|(r, _)| (r, None))
+                .collect();
+            parts.push(Change::RowHeights(sheet, heights));
+            let hidden = source.hidden_rows();
+            if hidden.range(at..=end).next().is_some() {
+                parts.push(Change::HiddenRows(
+                    sheet,
+                    hidden.iter().copied().filter(|r| !(at..=end).contains(r)).collect(),
+                ));
+            }
+        } else {
             let widths: Vec<(u32, Option<f32>)> =
                 source.col_widths().filter(|(c, _)| (at..=end).contains(c)).map(|(c, _)| (c, None)).collect();
             parts.push(Change::ColWidths(sheet, widths));

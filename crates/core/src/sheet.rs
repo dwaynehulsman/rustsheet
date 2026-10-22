@@ -1,7 +1,7 @@
 //! Storage for one worksheet: sparse cells and column widths. Formulas are
 //! evaluated by the [`Workbook`](crate::workbook::Workbook) that owns the sheet.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::addr::{CellRef, MAX_COLS, MAX_ROWS, Range};
 use crate::column::Column;
@@ -15,6 +15,10 @@ pub type SheetId = u32;
 
 /// Column width used when none was set, in points.
 pub const DEFAULT_COL_WIDTH: f32 = 84.0;
+/// Row height used when none was set, in points.
+pub const DEFAULT_ROW_HEIGHT: f32 = 22.0;
+/// Lowest a row can be dragged.
+pub const MIN_ROW_HEIGHT: f32 = 8.0;
 /// Narrowest a column can be dragged.
 pub const MIN_COL_WIDTH: f32 = 8.0;
 
@@ -48,6 +52,14 @@ pub struct Sheet {
     /// cells that exist.
     columns: Vec<Column>,
     col_widths: BTreeMap<u32, f32>,
+    row_heights: BTreeMap<u32, f32>,
+    /// Rows hidden by a filter (or hidden in an opened file).
+    hidden_rows: BTreeSet<u32>,
+    /// Rows whose height differs from the default, with the total extra
+    /// height up to and including each, for fast row positions.
+    row_extra: Vec<(u32, f64)>,
+    /// Rows and columns kept in view at the top and left.
+    freeze: (u32, u32),
 }
 
 impl Sheet {
@@ -160,6 +172,17 @@ impl Sheet {
             for col in &mut self.columns {
                 col.shift(at, delta, MAX_ROWS);
             }
+            let moved = |r: u32| -> Option<u32> {
+                let removed = delta < 0 && i64::from(r) >= i64::from(at) + delta && r < at;
+                let target = if r >= at { i64::from(r) + delta } else { i64::from(r) };
+                (!removed && (0..i64::from(MAX_ROWS)).contains(&target)).then_some(target as u32)
+            };
+            self.row_heights = std::mem::take(&mut self.row_heights)
+                .into_iter()
+                .filter_map(|(r, h)| Some((moved(r)?, h)))
+                .collect();
+            self.hidden_rows = std::mem::take(&mut self.hidden_rows).into_iter().filter_map(moved).collect();
+            self.rebuild_rows();
             return;
         }
         let at_i = at as usize;
@@ -192,6 +215,101 @@ impl Sheet {
     pub fn edge_occupied(&self, rows: bool, count: u32) -> bool {
         let Some(used) = self.used_range() else { return false };
         if rows { used.end.row >= MAX_ROWS - count } else { used.end.col >= MAX_COLS - count }
+    }
+
+    /// Height of `row` as drawn: 0 when hidden.
+    pub fn row_height(&self, row: u32) -> f32 {
+        if self.hidden_rows.contains(&row) {
+            0.0
+        } else {
+            self.row_heights.get(&row).copied().unwrap_or(DEFAULT_ROW_HEIGHT)
+        }
+    }
+
+    pub fn custom_row_height(&self, row: u32) -> Option<f32> {
+        self.row_heights.get(&row).copied()
+    }
+
+    pub fn row_heights(&self) -> impl Iterator<Item = (u32, f32)> + '_ {
+        self.row_heights.iter().map(|(&r, &h)| (r, h))
+    }
+
+    /// Sets or clears a custom height and returns the previous one.
+    pub fn set_row_height(&mut self, row: u32, height: Option<f32>) -> Option<f32> {
+        let old = match height {
+            Some(h) => self.row_heights.insert(row, h.max(MIN_ROW_HEIGHT)),
+            None => self.row_heights.remove(&row),
+        };
+        self.rebuild_rows();
+        old
+    }
+
+    pub fn is_row_hidden(&self, row: u32) -> bool {
+        self.hidden_rows.contains(&row)
+    }
+
+    pub fn hidden_rows(&self) -> &BTreeSet<u32> {
+        &self.hidden_rows
+    }
+
+    /// Replaces the set of hidden rows, returning the old one.
+    pub fn set_hidden_rows(&mut self, rows: BTreeSet<u32>) -> BTreeSet<u32> {
+        let old = std::mem::replace(&mut self.hidden_rows, rows);
+        self.rebuild_rows();
+        old
+    }
+
+    fn rebuild_rows(&mut self) {
+        let rows: BTreeSet<u32> = self.row_heights.keys().chain(self.hidden_rows.iter()).copied().collect();
+        let mut total = 0.0;
+        self.row_extra = rows
+            .into_iter()
+            .map(|r| {
+                total += f64::from(self.row_height(r) - DEFAULT_ROW_HEIGHT);
+                (r, total)
+            })
+            .collect();
+    }
+
+    /// Y offset of the top edge of `row`.
+    pub fn row_y(&self, row: u32) -> f64 {
+        // Extra height of all exceptional rows above `row`.
+        let i = self.row_extra.partition_point(|(r, _)| *r < row);
+        let extra = if i == 0 { 0.0 } else { self.row_extra[i - 1].1 };
+        f64::from(row) * f64::from(DEFAULT_ROW_HEIGHT) + extra
+    }
+
+    /// The row whose span contains offset `y` (clamped to the grid; hidden
+    /// rows are skipped).
+    pub fn row_at_y(&self, y: f64) -> u32 {
+        if y <= 0.0 {
+            return self.first_visible_row(0);
+        }
+        let (mut lo, mut hi) = (0u32, MAX_ROWS - 1);
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            if self.row_y(mid) <= y { lo = mid } else { hi = mid - 1 }
+        }
+        lo
+    }
+
+    /// `row` or the first row after it that is not hidden.
+    pub fn first_visible_row(&self, row: u32) -> u32 {
+        let mut r = row;
+        while self.hidden_rows.contains(&r) && r < MAX_ROWS - 1 {
+            r += 1;
+        }
+        r
+    }
+
+    pub fn freeze(&self) -> (u32, u32) {
+        self.freeze
+    }
+
+    /// Keeps the first `rows` rows and `cols` columns in view; returns the
+    /// previous setting.
+    pub fn set_freeze(&mut self, rows: u32, cols: u32) -> (u32, u32) {
+        std::mem::replace(&mut self.freeze, (rows.min(MAX_ROWS - 1), cols.min(MAX_COLS - 1)))
     }
 
     /// X offset of the left edge of `col`, honouring custom widths.
@@ -245,5 +363,36 @@ impl Sheet {
         if let Some(cell) = self.columns.get_mut(at.col as usize).and_then(|c| c.get_mut(at.row)) {
             cell.value = value;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_positions_follow_heights_and_hidden_rows() {
+        let mut s = Sheet::new("Blad1");
+        let d = f64::from(DEFAULT_ROW_HEIGHT);
+        assert_eq!(s.row_y(10), 10.0 * d);
+        assert_eq!(s.row_at_y(10.0 * d + 1.0), 10);
+        s.set_row_height(2, Some(50.0));
+        assert_eq!(s.row_y(3), 2.0 * d + 50.0);
+        assert_eq!(s.row_at_y(2.0 * d + 49.0), 2);
+        assert_eq!(s.row_at_y(2.0 * d + 51.0), 3);
+        s.set_hidden_rows([4, 5].into_iter().collect());
+        assert_eq!(s.row_height(4), 0.0);
+        assert_eq!(s.row_y(6), s.row_y(4));
+        // A y inside the row after hidden rows lands on that row, not a hidden one.
+        assert_eq!(s.row_at_y(s.row_y(6) + 1.0), 6);
+        assert_eq!(s.row_y(1_000_000), 1_000_000.0 * d + 50.0 - d - 2.0 * d);
+        assert_eq!(s.first_visible_row(4), 6);
+
+        // Inserting rows above moves heights and hidden rows along.
+        s.shift_lines(true, 0, 3);
+        assert_eq!(s.custom_row_height(5), Some(50.0));
+        assert!(s.is_row_hidden(7) && s.is_row_hidden(8) && !s.is_row_hidden(4));
+        s.shift_lines(true, 3, -3);
+        assert_eq!(s.custom_row_height(2), Some(50.0));
     }
 }

@@ -15,13 +15,15 @@ use crate::addr::{CellRef, MAX_COLS, MAX_ROWS};
 use crate::format::{Align, CellFormat, NumFmt};
 use crate::formula::parse_formula;
 use crate::input::Content;
-use crate::sheet::{CellState, DEFAULT_COL_WIDTH, Sheet};
+use crate::sheet::{CellState, DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, Sheet};
 use crate::value::{ErrorKind, Value};
 use crate::workbook::Workbook as Book;
 
 /// Excel's default column is 64 pixels wide; ours is [`DEFAULT_COL_WIDTH`].
 /// Widths scale by this factor so a default column stays default.
 const WIDTH_SCALE: f64 = DEFAULT_COL_WIDTH as f64 / 64.0;
+/// Excel's default row is 15 points; ours is [`DEFAULT_ROW_HEIGHT`].
+const HEIGHT_SCALE: f64 = DEFAULT_ROW_HEIGHT as f64 / 15.0;
 
 fn data_to_value(data: &Data) -> Option<(Value, Option<NumFmt>)> {
     Some(match data {
@@ -148,6 +150,16 @@ fn build_sheet(
             sheet.put(at, CellState { content: Content::Empty, format });
         }
     }
+    // Excel's default row is 15 points; ours is DEFAULT_ROW_HEIGHT.
+    for (row, points) in styles.row_heights {
+        if row < MAX_ROWS {
+            sheet.set_row_height(row, Some((points * HEIGHT_SCALE) as f32));
+        }
+    }
+    if !styles.hidden_rows.is_empty() {
+        sheet.set_hidden_rows(styles.hidden_rows.into_iter().filter(|&r| r < MAX_ROWS).collect());
+    }
+    sheet.set_freeze(styles.freeze.0, styles.freeze.1);
     for (col, chars) in styles.col_widths {
         if col < MAX_COLS {
             // The stored width already includes Excel's padding, so at the
@@ -271,6 +283,16 @@ fn write_sheet(
         let px = (f64::from(width) / WIDTH_SCALE).round().max(0.0) as u32;
         ws.set_column_width_pixels(col as u16, px).map_err(xlsx_err)?;
     }
+    for (row, height) in sheet.row_heights() {
+        ws.set_row_height(row, f64::from(height) / HEIGHT_SCALE).map_err(xlsx_err)?;
+    }
+    for &row in sheet.hidden_rows() {
+        ws.set_row_hidden(row).map_err(xlsx_err)?;
+    }
+    let (fr, fc) = sheet.freeze();
+    if fr > 0 || fc > 0 {
+        ws.set_freeze_panes(fr, fc as u16).map_err(xlsx_err)?;
+    }
     Ok(())
 }
 
@@ -322,6 +344,9 @@ mod tests {
     fn xlsx_round_trip_keeps_values_formulas_and_formats() {
         let mut sheet = Sheet::new("Begroting");
         sheet.set_col_width(0, Some(150.0));
+        sheet.set_row_height(3, Some(44.0));
+        sheet.set_hidden_rows([6].into_iter().collect());
+        sheet.set_freeze(1, 1);
         let mut book = Book::from_sheets(vec![sheet]);
         let mut set = |at: &str, text: &str, format: CellFormat| set(&mut book, 0, at, text, format);
         let bold = CellFormat { bold: true, ..CellFormat::default() };
@@ -356,6 +381,10 @@ mod tests {
         let width = back.col_width(0);
         assert!((width - 150.0).abs() < 2.0, "width {width}");
         assert_eq!(back.custom_col_width(1), None);
+        let height = back.custom_row_height(3).expect("row height kept");
+        assert!((height - 44.0).abs() < 0.5, "height {height}");
+        assert!(back.is_row_hidden(6) && !back.is_row_hidden(5));
+        assert_eq!(back.freeze(), (1, 1));
     }
 
     #[test]
