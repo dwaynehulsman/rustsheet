@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::addr::{CellRef, MAX_COLS, Range};
+use crate::addr::{CellRef, MAX_COLS, MAX_ROWS, Range};
 use crate::column::Column;
 use crate::format::{CellFormat, format_value};
 use crate::input::Content;
@@ -149,6 +149,49 @@ impl Sheet {
             Some(w) => self.col_widths.insert(col, w.max(MIN_COL_WIDTH)),
             None => self.col_widths.remove(&col),
         }
+    }
+
+    /// Moves rows (or columns) at and after `at` by `delta`. For a negative
+    /// `delta` the lines `at + delta .. at` are removed and must already be
+    /// empty of cells; lines pushed off the grid are dropped (callers check
+    /// that first).
+    pub(crate) fn shift_lines(&mut self, rows: bool, at: u32, delta: i64) {
+        if rows {
+            for col in &mut self.columns {
+                col.shift(at, delta, MAX_ROWS);
+            }
+            return;
+        }
+        let at_i = at as usize;
+        if delta > 0 {
+            if at_i < self.columns.len() {
+                for _ in 0..delta {
+                    self.columns.insert(at_i, Column::default());
+                }
+                self.columns.truncate(MAX_COLS as usize);
+            }
+        } else {
+            let start = (i64::from(at) + delta).max(0) as usize;
+            let end = at_i.min(self.columns.len());
+            if start < end {
+                self.columns.drain(start..end);
+            }
+        }
+        let widths = std::mem::take(&mut self.col_widths);
+        for (col, w) in widths {
+            let removed = delta < 0 && i64::from(col) >= i64::from(at) + delta && col < at;
+            let target = if col >= at { i64::from(col) + delta } else { i64::from(col) };
+            if !removed && (0..i64::from(MAX_COLS)).contains(&target) {
+                self.col_widths.insert(target as u32, w);
+            }
+        }
+    }
+
+    /// Whether the last `count` rows (or columns) of the grid hold anything,
+    /// in which case inserting would push data off the sheet.
+    pub fn edge_occupied(&self, rows: bool, count: u32) -> bool {
+        let Some(used) = self.used_range() else { return false };
+        if rows { used.end.row >= MAX_ROWS - count } else { used.end.col >= MAX_COLS - count }
     }
 
     /// X offset of the left edge of `col`, honouring custom widths.

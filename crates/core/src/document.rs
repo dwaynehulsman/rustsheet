@@ -1,6 +1,7 @@
 //! A workbook plus its undo history and saved/unsaved bookkeeping.
 
-use crate::addr::{CellRef, Range};
+use crate::addr::{CellRef, MAX_COLS, MAX_ROWS, Range};
+use crate::formula::{LineChange, same_sheet_name};
 use crate::input::Content;
 use crate::sheet::{CellState, Sheet, SheetId};
 use crate::workbook::Workbook;
@@ -14,6 +15,14 @@ pub enum Change {
     InsertSheet(usize, Box<Sheet>),
     RemoveSheet(SheetId),
     RenameSheet(SheetId, String),
+    /// Moves rows (`rows`) or columns at and after `at` by `delta`, without
+    /// rewriting formulas; see [`Document::insert_lines`].
+    Lines {
+        sheet: SheetId,
+        rows: bool,
+        at: u32,
+        delta: i64,
+    },
     /// Several changes as one step, applied in order.
     Batch(Vec<Change>),
 }
@@ -50,7 +59,7 @@ impl Change {
                 })?;
                 Some(Spot { sheet: *sheet, range: Some(range) })
             }
-            Change::ColWidths(sheet, _) | Change::RenameSheet(sheet, _) => {
+            Change::ColWidths(sheet, _) | Change::RenameSheet(sheet, _) | Change::Lines { sheet, .. } => {
                 Some(Spot { sheet: *sheet, range: None })
             }
             Change::InsertSheet(_, sheet) => Some(Spot { sheet: sheet.id(), range: None }),
@@ -144,6 +153,11 @@ impl Document {
                 Some(old) => Change::RenameSheet(id, old),
                 None => Change::Batch(Vec::new()),
             },
+            Change::Lines { sheet, rows, at, delta } => {
+                self.book.shift_lines(sheet, rows, at, delta);
+                let back = (i64::from(at) + delta).max(0) as u32;
+                Change::Lines { sheet, rows, at: back, delta: -delta }
+            }
             Change::Batch(parts) => {
                 let mut inverse: Vec<Change> = parts.into_iter().map(|p| self.apply_raw(p)).collect();
                 inverse.reverse();
@@ -257,6 +271,102 @@ impl Document {
         parts.push(Change::RemoveSheet(id));
         self.apply(Change::Batch(parts), Some(Spot { sheet: id, range: None }));
         Ok(())
+    }
+
+    /// Inserts `count` empty rows (or columns) before line `at` of a sheet.
+    /// Formulas on every sheet that refer to that sheet move along; ranges
+    /// spanning the insertion grow. One undoable step.
+    pub fn insert_lines(&mut self, sheet: SheetId, rows: bool, at: u32, count: u32) -> Result<(), String> {
+        let index = self.book.index_of(sheet).ok_or("Dit blad bestaat niet meer.")?;
+        if count == 0 {
+            return Ok(());
+        }
+        if self.book.sheet(index).edge_occupied(rows, count) {
+            return Err(format!(
+                "Kan geen {} invoegen: dan zouden gegevens van het blad af schuiven.",
+                if rows { "rijen" } else { "kolommen" }
+            ));
+        }
+        let change = LineChange { rows, at, count: i64::from(count) };
+        let mut parts = vec![Change::Lines { sheet, rows, at, delta: i64::from(count) }];
+        parts.extend(self.rewrite_for_lines(sheet, change));
+        self.apply(Change::Batch(parts), Some(Spot { sheet, range: None }));
+        Ok(())
+    }
+
+    /// Deletes `count` rows (or columns) starting at line `at`. Formulas
+    /// that referred into them get `#REF!`; others move along and ranges
+    /// shrink. One undoable step that also restores the deleted cells.
+    pub fn delete_lines(&mut self, sheet: SheetId, rows: bool, at: u32, count: u32) -> Result<(), String> {
+        let index = self.book.index_of(sheet).ok_or("Dit blad bestaat niet meer.")?;
+        let limit = if rows { MAX_ROWS } else { MAX_COLS };
+        let count = count.min(limit.saturating_sub(at));
+        if count == 0 {
+            return Ok(());
+        }
+        let end = at + count - 1;
+        let zone = if rows {
+            Range::new(CellRef::new(at, 0), CellRef::new(end, MAX_COLS - 1))
+        } else {
+            Range::new(CellRef::new(0, at), CellRef::new(MAX_ROWS - 1, end))
+        };
+        let source = self.book.sheet(index);
+        let clear: Vec<(CellRef, CellState)> =
+            source.cells_in(zone).map(|(c, _)| (c, CellState::default())).collect();
+        let mut parts = vec![Change::Cells(sheet, clear)];
+        if !rows {
+            let widths: Vec<(u32, Option<f32>)> =
+                source.col_widths().filter(|(c, _)| (at..=end).contains(c)).map(|(c, _)| (c, None)).collect();
+            parts.push(Change::ColWidths(sheet, widths));
+        }
+        let change = LineChange { rows, at, count: -i64::from(count) };
+        let rewrites = self.rewrite_for_lines(sheet, change);
+        parts.push(Change::Lines { sheet, rows, at: at + count, delta: -i64::from(count) });
+        parts.extend(rewrites);
+        self.apply(Change::Batch(parts), Some(Spot { sheet, range: None }));
+        Ok(())
+    }
+
+    /// Formulas rewritten for a row or column change on `sheet`, placed at
+    /// the positions they will have after the lines have moved.
+    fn rewrite_for_lines(&self, sheet: SheetId, change: LineChange) -> Vec<Change> {
+        let Some(name) = self.book.sheet_by_id(sheet).map(|s| s.name().to_string()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for s in self.book.sheets() {
+            let own = s.id() == sheet;
+            let targets = |r: &Option<String>| match r {
+                None => own,
+                Some(n) => same_sheet_name(n, &name),
+            };
+            let mut cells = Vec::new();
+            for (at, cell) in s.cells() {
+                let Some(expr) = cell.content.formula() else { continue };
+                if !own && !expr.mentions_sheet(&name) {
+                    continue;
+                }
+                let new_at = if own {
+                    let line = if change.rows { at.row } else { at.col };
+                    // A formula in a deleted line goes with it.
+                    let Some(moved) = change.line(line) else { continue };
+                    if change.rows { CellRef::new(moved, at.col) } else { CellRef::new(at.row, moved) }
+                } else {
+                    at
+                };
+                let adjusted = expr.with_lines_moved(&targets, change);
+                if &adjusted != expr {
+                    cells.push((
+                        new_at,
+                        CellState { content: Content::Formula(adjusted), format: cell.format },
+                    ));
+                }
+            }
+            if !cells.is_empty() {
+                out.push(Change::Cells(s.id(), cells));
+            }
+        }
+        out
     }
 
     /// Cell changes that point formulas naming sheet `old` at `new`, or at

@@ -169,6 +169,73 @@ pub enum Expr {
     Missing,
 }
 
+/// Rows or columns inserted (`count > 0`) or deleted (`count < 0`) at `at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineChange {
+    pub rows: bool,
+    pub at: u32,
+    pub count: i64,
+}
+
+impl LineChange {
+    fn limit(&self) -> i64 {
+        i64::from(if self.rows { MAX_ROWS } else { MAX_COLS })
+    }
+
+    /// Where line `index` ends up; `None` if it was deleted or pushed off.
+    pub fn line(&self, index: u32) -> Option<u32> {
+        self.point(index)
+    }
+
+    fn point(&self, index: u32) -> Option<u32> {
+        let (i, at, n) = (i64::from(index), i64::from(self.at), self.count);
+        let moved = if n >= 0 {
+            if i >= at { i + n } else { i }
+        } else if i < at {
+            i
+        } else if i < at - n {
+            return None;
+        } else {
+            i + n
+        };
+        (moved < self.limit()).then_some(moved as u32)
+    }
+
+    /// Where a span of lines ends up, keeping which end was written first.
+    fn span(&self, a: Coord, b: Coord) -> Option<(Coord, Coord)> {
+        let (lo, hi) = (a.index.min(b.index), a.index.max(b.index));
+        let (lo2, hi2) = if self.count >= 0 {
+            let lo2 = self.point(lo)?;
+            let hi2 = self.point(hi).unwrap_or(self.limit() as u32 - 1);
+            (lo2, hi2)
+        } else {
+            let (at, end) = (self.at, (i64::from(self.at) - self.count) as u32);
+            let lo2 = if lo < at {
+                lo
+            } else if lo >= end {
+                lo - (end - at)
+            } else {
+                at
+            };
+            let hi2 = if hi < at {
+                hi
+            } else if hi >= end {
+                hi - (end - at)
+            } else if at == 0 {
+                return None;
+            } else {
+                at - 1
+            };
+            if hi2 < lo2 || (lo >= at && hi < end) {
+                return None;
+            }
+            (lo2, hi2)
+        };
+        let (na, nb) = if a.index <= b.index { (lo2, hi2) } else { (hi2, lo2) };
+        Some((Coord { index: na, abs: a.abs }, Coord { index: nb, abs: b.abs }))
+    }
+}
+
 /// A cell or range a formula reads, on a given sheet; used by the
 /// dependency graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -248,6 +315,72 @@ impl Expr {
             }
             Expr::Call(_, args) => args.iter().for_each(|a| a.precedents(own, resolve, out)),
             _ => {}
+        }
+    }
+
+    /// Copy adjusted for rows (or columns) inserted or deleted on a sheet.
+    /// `targets` says whether a reference's sheet part points at that sheet.
+    /// References move whether relative or absolute; ranges grow when rows
+    /// are inserted inside them and shrink when rows are deleted; references
+    /// into deleted rows become `#REF!`, like Excel.
+    pub fn with_lines_moved(&self, targets: &dyn Fn(&Option<String>) -> bool, change: LineChange) -> Expr {
+        let rec = |e: &Expr| e.with_lines_moved(targets, change);
+        match self {
+            Expr::Ref { sheet, addr } if targets(sheet) => {
+                let coord = if change.rows { addr.row } else { addr.col };
+                match change.point(coord.index) {
+                    Some(index) => {
+                        let mut addr = *addr;
+                        let moved = Coord { index, abs: coord.abs };
+                        if change.rows {
+                            addr.row = moved
+                        } else {
+                            addr.col = moved
+                        }
+                        Expr::Ref { sheet: sheet.clone(), addr }
+                    }
+                    None => Expr::Error(ErrorKind::Ref),
+                }
+            }
+            Expr::Range(r) if targets(&r.sheet) => {
+                let kind = match r.kind {
+                    RangeKind::Cells(a, b) => {
+                        let (ca, cb) = if change.rows { (a.row, b.row) } else { (a.col, b.col) };
+                        match change.span(ca, cb) {
+                            Some((na, nb)) => {
+                                let (mut a, mut b) = (a, b);
+                                if change.rows {
+                                    a.row = na;
+                                    b.row = nb;
+                                } else {
+                                    a.col = na;
+                                    b.col = nb;
+                                }
+                                RangeKind::Cells(a, b)
+                            }
+                            None => return Expr::Error(ErrorKind::Ref),
+                        }
+                    }
+                    RangeKind::Rows(a, b) if change.rows => match change.span(a, b) {
+                        Some((a, b)) => RangeKind::Rows(a, b),
+                        None => return Expr::Error(ErrorKind::Ref),
+                    },
+                    RangeKind::Cols(a, b) if !change.rows => match change.span(a, b) {
+                        Some((a, b)) => RangeKind::Cols(a, b),
+                        None => return Expr::Error(ErrorKind::Ref),
+                    },
+                    other => other,
+                };
+                Expr::Range(RangeAddr { sheet: r.sheet.clone(), kind })
+            }
+            Expr::Unary(op, e) => Expr::Unary(*op, Box::new(rec(e))),
+            Expr::Percent(e) => Expr::Percent(Box::new(rec(e))),
+            Expr::Paren(e) => Expr::Paren(Box::new(rec(e))),
+            Expr::Binary(first, rest) => {
+                Expr::Binary(Box::new(rec(first)), rest.iter().map(|(op, e)| (*op, rec(e))).collect())
+            }
+            Expr::Call(name, args) => Expr::Call(name.clone(), args.iter().map(rec).collect()),
+            other => other.clone(),
         }
     }
 

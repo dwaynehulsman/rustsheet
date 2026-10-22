@@ -212,6 +212,14 @@ impl Workbook {
         Some(old)
     }
 
+    /// Moves rows or columns of sheet `id` at and after `at` by `delta`,
+    /// without touching formulas (see [`crate::Document::insert_lines`]).
+    pub fn shift_lines(&mut self, id: SheetId, rows: bool, at: u32, delta: i64) {
+        let Some(index) = self.index_of(id) else { return };
+        self.sheets[index].shift_lines(rows, at, delta);
+        self.rebuild();
+    }
+
     /// Checks a sheet name against Excel's rules; returns it trimmed.
     /// `except` is the sheet being renamed, which may keep its own name.
     pub fn check_name(&self, name: &str, except: Option<SheetId>) -> Result<String, String> {

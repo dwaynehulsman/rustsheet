@@ -167,6 +167,54 @@ impl Column {
         )
     }
 
+    /// Moves every cell at or below `at` by `delta` rows. For a negative
+    /// `delta` the rows `at + delta .. at` must already be empty; cells that
+    /// would land past `limit` are dropped (callers check that first).
+    pub fn shift(&mut self, at: u32, delta: i64, limit: u32) {
+        if delta == 0 {
+            return;
+        }
+        let first_page = (at >> PAGE_BITS) as usize;
+        let mut moved = Vec::new();
+        for p in first_page..self.pages.len() {
+            let Some(page) = &self.pages[p] else { continue };
+            let base = (p as u32) << PAGE_BITS;
+            let rows: Vec<u32> =
+                page.iter().map(|(slot, _)| base + u32::from(slot)).filter(|&r| r >= at).collect();
+            moved.extend(rows);
+        }
+        let mut cells = Vec::with_capacity(moved.len());
+        for row in moved {
+            let (p, slot) = split(row);
+            if let Some(page) = self.pages[p].as_mut() {
+                let cell = match page {
+                    Page::Sparse(v) => v.binary_search_by_key(&slot, |(s, _)| *s).ok().map(|i| v.remove(i).1),
+                    Page::Dense(c, n) => {
+                        let cell = c[slot as usize].take();
+                        *n -= u32::from(cell.is_some());
+                        cell
+                    }
+                };
+                if let Some(cell) = cell {
+                    self.len -= 1;
+                    cells.push((row, cell));
+                }
+                if page.len() == 0 {
+                    self.pages[p] = None;
+                }
+            }
+        }
+        while self.pages.last().is_some_and(Option::is_none) {
+            self.pages.pop();
+        }
+        for (row, cell) in cells {
+            let target = i64::from(row) + delta;
+            if target >= 0 && target < i64::from(limit) {
+                self.insert(target as u32, cell);
+            }
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (u32, &Cell)> + '_ {
         self.range(0, u32::MAX)
     }
@@ -213,6 +261,21 @@ mod tests {
             col.insert(row, cell(1.0));
         }
         assert!(col.pages.iter().all(|p| matches!(p, Some(Page::Sparse(v)) if v.len() == 1)));
+    }
+
+    #[test]
+    fn shifting_moves_cells_below_a_row() {
+        let mut col = Column::default();
+        for row in [0, 5, 6, 100, 1000] {
+            col.insert(row, cell(f64::from(row)));
+        }
+        col.shift(5, 3, 1_048_576);
+        let rows: Vec<u32> = col.iter().map(|(r, _)| r).collect();
+        assert_eq!(rows, [0, 8, 9, 103, 1003]);
+        col.shift(8, -3, 1_048_576);
+        let rows: Vec<u32> = col.iter().map(|(r, _)| r).collect();
+        assert_eq!(rows, [0, 5, 6, 100, 1000]);
+        assert_eq!(col.len(), 5);
     }
 
     #[test]
