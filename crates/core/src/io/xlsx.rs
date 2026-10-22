@@ -10,13 +10,14 @@ use calamine::{Data, Reader, open_workbook_auto};
 use rust_xlsxwriter::{Format, FormatAlign, Formula, Workbook};
 
 use super::IoError;
-use super::styles::read_sheet_styles;
+use super::styles::{SheetStyles, read_styles};
 use crate::addr::{CellRef, MAX_COLS, MAX_ROWS};
 use crate::format::{Align, CellFormat, NumFmt};
 use crate::formula::parse_formula;
 use crate::input::Content;
 use crate::sheet::{CellState, DEFAULT_COL_WIDTH, Sheet};
 use crate::value::{ErrorKind, Value};
+use crate::workbook::Workbook as Book;
 
 /// Excel's default column is 64 pixels wide; ours is [`DEFAULT_COL_WIDTH`].
 /// Widths scale by this factor so a default column stays default.
@@ -50,30 +51,62 @@ fn format_err(e: impl std::fmt::Display) -> IoError {
     IoError::Format(format!("kan werkmap niet lezen: {e}"))
 }
 
-/// Reads the first worksheet of a workbook. Formulas are re-evaluated by
-/// our engine; a formula we cannot parse keeps its cached value.
-pub fn read_workbook(path: &Path) -> Result<Sheet, IoError> {
+/// Reads every worksheet of a workbook (chart and macro sheets are
+/// skipped). Formulas are re-evaluated by our engine; a formula we cannot
+/// parse keeps its cached value.
+pub fn read_workbook(path: &Path) -> Result<Book, IoError> {
     let mut workbook = open_workbook_auto(path).map_err(format_err)?;
-    let name = workbook
-        .sheet_names()
-        .first()
-        .cloned()
-        .ok_or_else(|| IoError::Format("de werkmap bevat geen werkbladen".into()))?;
+    let names: Vec<String> = workbook
+        .sheets_metadata()
+        .iter()
+        .filter(|s| s.typ == calamine::SheetType::WorkSheet)
+        .map(|s| s.name.clone())
+        .collect();
+    if names.is_empty() {
+        return Err(IoError::Format("de werkmap bevat geen werkbladen".into()));
+    }
     // Values, formulas and styles each need a pass over the sheet XML; run
     // them side by side, each with its own reader.
     let (values, formulas, styles) = std::thread::scope(|s| {
         let formulas = s.spawn(|| {
             let mut workbook = open_workbook_auto(path).map_err(format_err)?;
-            workbook.worksheet_formula(&name).map_err(format_err)
+            names
+                .iter()
+                .map(|n| workbook.worksheet_formula(n).map_err(format_err))
+                .collect::<Result<Vec<_>, _>>()
         });
-        let styles = s.spawn(|| File::open(path).map(|f| read_sheet_styles(f, 0)).unwrap_or_default());
-        let values = workbook.worksheet_range(&name).map_err(format_err);
+        let styles = s.spawn(|| {
+            File::open(path)
+                .map(|f| read_styles(f, &names))
+                .unwrap_or_else(|_| names.iter().map(|_| Default::default()).collect())
+        });
+        let values = names
+            .iter()
+            .map(|n| workbook.worksheet_range(n).map_err(format_err))
+            .collect::<Result<Vec<_>, _>>();
         let formulas =
             formulas.join().unwrap_or_else(|_| Err(IoError::Format("formules lezen mislukt".into())));
-        (values, formulas, styles.join().unwrap_or_default())
+        let styles = styles.join().unwrap_or_else(|_| names.iter().map(|_| Default::default()).collect());
+        (values, formulas, styles)
     });
     let (values, formulas) = (values?, formulas?);
 
+    let sheets = names
+        .into_iter()
+        .zip(values)
+        .zip(formulas)
+        .zip(styles)
+        .map(|(((name, values), formulas), styles)| build_sheet(name, &values, &formulas, styles))
+        .collect();
+    Ok(Book::from_sheets(sheets))
+}
+
+fn build_sheet(
+    name: String,
+    values: &calamine::Range<Data>,
+    formulas: &calamine::Range<String>,
+    styles: SheetStyles,
+) -> Sheet {
     let mut sheet = Sheet::new(name);
     let mut formats: HashMap<CellRef, CellFormat> = styles.cells.into_iter().collect();
     let in_grid = |r: u32, c: u32| r < MAX_ROWS && c < MAX_COLS;
@@ -123,8 +156,7 @@ pub fn read_workbook(path: &Path) -> Result<Sheet, IoError> {
             sheet.set_col_width(col, Some((px * WIDTH_SCALE) as f32));
         }
     }
-    sheet.recalc_all();
-    Ok(sheet)
+    sheet
 }
 
 fn xlsx_format(f: &CellFormat) -> Format {
@@ -159,11 +191,24 @@ fn xlsx_err(e: rust_xlsxwriter::XlsxError) -> IoError {
     IoError::Format(format!("kan xlsx niet schrijven: {e}"))
 }
 
-pub fn write_xlsx_bytes(sheet: &Sheet) -> Result<Vec<u8>, IoError> {
+/// Writes every sheet of `book` as an xlsx file.
+pub fn write_xlsx_bytes(book: &Book) -> Result<Vec<u8>, IoError> {
     let mut workbook = Workbook::new();
-    let ws = workbook.add_worksheet();
-    ws.set_name(valid_sheet_name(sheet.name()).unwrap_or("Blad1")).map_err(xlsx_err)?;
     let mut formats: HashMap<CellFormat, Format> = HashMap::new();
+    for (i, sheet) in book.sheets().iter().enumerate() {
+        let fallback = format!("Blad{}", i + 1);
+        let ws = workbook.add_worksheet();
+        ws.set_name(valid_sheet_name(sheet.name()).unwrap_or(&fallback)).map_err(xlsx_err)?;
+        write_sheet(ws, sheet, &mut formats)?;
+    }
+    workbook.save_to_buffer().map_err(xlsx_err)
+}
+
+fn write_sheet(
+    ws: &mut rust_xlsxwriter::Worksheet,
+    sheet: &Sheet,
+    formats: &mut HashMap<CellFormat, Format>,
+) -> Result<(), IoError> {
     for (at, cell) in sheet.cells() {
         let (row, col) = (at.row, at.col as u16);
         // Unformatted cells skip the format entirely; looking up a format in
@@ -217,11 +262,11 @@ pub fn write_xlsx_bytes(sheet: &Sheet) -> Result<Vec<u8>, IoError> {
         let px = (f64::from(width) / WIDTH_SCALE).round().max(0.0) as u32;
         ws.set_column_width_pixels(col as u16, px).map_err(xlsx_err)?;
     }
-    workbook.save_to_buffer().map_err(xlsx_err)
+    Ok(())
 }
 
-pub fn write_xlsx(sheet: &Sheet, path: &Path) -> Result<(), IoError> {
-    write_atomic(path, &write_xlsx_bytes(sheet)?)
+pub fn write_xlsx(book: &Book, path: &Path) -> Result<(), IoError> {
+    write_atomic(path, &write_xlsx_bytes(book)?)
 }
 
 /// Writes to a temporary file next to `path` and renames it into place, so
@@ -257,14 +302,19 @@ mod tests {
         dir.join(name)
     }
 
+    fn set(book: &mut Book, sheet: usize, at: &str, text: &str, format: CellFormat) {
+        let p = parse_input(text).unwrap();
+        let format = CellFormat { num: p.format.unwrap_or(format.num), ..format };
+        let id = book.sheet(sheet).id();
+        book.set_states(id, vec![(c(at), CellState { content: p.content, format })]);
+    }
+
     #[test]
     fn xlsx_round_trip_keeps_values_formulas_and_formats() {
         let mut sheet = Sheet::new("Begroting");
-        let mut set = |at: &str, text: &str, format: CellFormat| {
-            let p = parse_input(text).unwrap();
-            let format = CellFormat { num: p.format.unwrap_or(format.num), ..format };
-            sheet.set_states(vec![(c(at), CellState { content: p.content, format })]);
-        };
+        sheet.set_col_width(0, Some(150.0));
+        let mut book = Book::from_sheets(vec![sheet]);
+        let mut set = |at: &str, text: &str, format: CellFormat| set(&mut book, 0, at, text, format);
         let bold = CellFormat { bold: true, ..CellFormat::default() };
         set("A1", "Post", bold);
         set("B1", "Bedrag", CellFormat { align: Align::Center, ..bold });
@@ -279,11 +329,11 @@ mod tests {
         set("E2", "TRUE", CellFormat::default());
         set("E3", "=1/0", CellFormat::default());
         set("F9", "", CellFormat { bold: true, ..CellFormat::default() });
-        sheet.set_col_width(0, Some(150.0));
 
         let path = temp_path("roundtrip.xlsx");
-        write_xlsx(&sheet, &path).unwrap();
+        write_xlsx(&book, &path).unwrap();
         let back = read_workbook(&path).unwrap();
+        let (sheet, back) = (book.sheet(0), back.sheet(0));
 
         assert_eq!(back.name(), "Begroting");
         for at in ["A1", "B1", "A2", "B2", "B3", "B4", "C4", "D2", "D3", "E2", "E3"] {
@@ -300,13 +350,34 @@ mod tests {
     }
 
     #[test]
+    fn xlsx_keeps_every_sheet_and_references_between_them() {
+        let mut book =
+            Book::from_sheets(vec![Sheet::new("Overzicht"), Sheet::new("Kosten 2026"), Sheet::new("Data")]);
+        set(&mut book, 1, "A1", "100", CellFormat::default());
+        set(&mut book, 1, "A2", "250", CellFormat { bold: true, ..CellFormat::default() });
+        set(&mut book, 2, "B5", "7", CellFormat::default());
+        set(&mut book, 0, "A1", "=SUM('Kosten 2026'!A1:A2)", CellFormat::default());
+        set(&mut book, 0, "A2", "=Data!B5*'Kosten 2026'!A1", CellFormat::default());
+        set(&mut book, 2, "C1", "=Overzicht!A1/2", CellFormat::default());
+        assert_eq!(book.sheet(0).display(c("A1")), "350");
+
+        let path = temp_path("sheets.xlsx");
+        write_xlsx(&book, &path).unwrap();
+        let back = read_workbook(&path).unwrap();
+        let names: Vec<&str> = back.sheets().iter().map(Sheet::name).collect();
+        assert_eq!(names, ["Overzicht", "Kosten 2026", "Data"]);
+        assert_eq!(back.sheet(0).display(c("A1")), "350");
+        assert_eq!(back.sheet(0).display(c("A2")), "700");
+        assert_eq!(back.sheet(2).display(c("C1")), "175");
+        assert_eq!(back.sheet(0).state(c("A1")).content.source(), "=SUM('Kosten 2026'!A1:A2)");
+        assert!(back.sheet(1).format(c("A2")).bold);
+    }
+
+    #[test]
     fn written_file_uses_excel_function_prefixes() {
-        let mut sheet = Sheet::new("Blad1");
-        sheet.set_states(vec![(
-            c("A1"),
-            CellState { content: parse_input("=CONCAT(\"a\",\"b\")").unwrap().content, ..Default::default() },
-        )]);
-        let bytes = write_xlsx_bytes(&sheet).unwrap();
+        let mut book = Book::new();
+        set(&mut book, 0, "A1", "=CONCAT(\"a\",\"b\")", CellFormat::default());
+        let bytes = write_xlsx_bytes(&book).unwrap();
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut xml = String::new();
         std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml)

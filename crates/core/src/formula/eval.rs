@@ -2,14 +2,16 @@
 
 use super::ast::{BinOp, Expr, RangeAddr, UnaryOp};
 use crate::addr::{CellRef, Range};
+use crate::sheet::SheetId;
 use crate::value::{ErrorKind, Value};
 
-/// Read access to cell values during evaluation.
+/// Read access to cell values during evaluation, across all sheets.
 pub trait CellSource {
-    fn sheet_name(&self) -> &str;
-    fn value(&self, at: CellRef) -> &Value;
+    /// The sheet called `name` (case-insensitive), if there is one.
+    fn resolve_sheet(&self, name: &str) -> Option<SheetId>;
+    fn value(&self, sheet: SheetId, at: CellRef) -> &Value;
     /// Calls `f` for every non-empty cell in `range`; stops early when it returns `false`.
-    fn for_each_value(&self, range: Range, f: &mut dyn FnMut(&Value) -> bool);
+    fn for_each_value(&self, sheet: SheetId, range: Range, f: &mut dyn FnMut(&Value) -> bool);
 }
 
 /// Names of all functions the evaluator knows, for autocompletion and docs.
@@ -34,37 +36,47 @@ pub const FUNCTIONS: &[&str] = &[
     "UPPER",
 ];
 
-pub fn evaluate(expr: &Expr, ctx: &dyn CellSource) -> Value {
-    Eval { ctx }.scalar(expr)
+/// Evaluates `expr` as a formula on sheet `sheet`.
+pub fn evaluate(expr: &Expr, ctx: &dyn CellSource, sheet: SheetId) -> Value {
+    Eval { ctx, sheet }.scalar(expr)
 }
 
 /// A function argument before it is reduced to a single value.
 enum Arg {
     Value(Value),
-    Range(Range),
+    Range(SheetId, Range),
 }
 
 struct Eval<'a> {
     ctx: &'a dyn CellSource,
+    /// The sheet the formula is on; unqualified references point here.
+    sheet: SheetId,
 }
 
 type Res<T> = Result<T, ErrorKind>;
 
 impl Eval<'_> {
-    fn local(&self, sheet: &Option<String>) -> bool {
-        sheet.as_deref().is_none_or(|s| s.eq_ignore_ascii_case(self.ctx.sheet_name()))
+    /// The sheet a reference points at; `#REF!` when it names no sheet.
+    fn target(&self, sheet: &Option<String>) -> Res<SheetId> {
+        match sheet {
+            None => Ok(self.sheet),
+            Some(name) => self.ctx.resolve_sheet(name).ok_or(ErrorKind::Ref),
+        }
     }
 
-    fn range(&self, r: &RangeAddr) -> Res<Range> {
-        if self.local(&r.sheet) { Ok(r.resolve()) } else { Err(ErrorKind::Ref) }
+    fn range(&self, r: &RangeAddr) -> Res<(SheetId, Range)> {
+        Ok((self.target(&r.sheet)?, r.resolve()))
     }
 
     /// Evaluates keeping references as ranges, which aggregate functions need.
     fn arg(&self, expr: &Expr) -> Arg {
         match expr {
-            Expr::Ref { sheet, addr } if self.local(sheet) => Arg::Range(Range::single(addr.cell())),
+            Expr::Ref { sheet, addr } => match self.target(sheet) {
+                Ok(id) => Arg::Range(id, Range::single(addr.cell())),
+                Err(e) => Arg::Value(Value::Error(e)),
+            },
             Expr::Range(r) => match self.range(r) {
-                Ok(range) => Arg::Range(range),
+                Ok((id, range)) => Arg::Range(id, range),
                 Err(e) => Arg::Value(Value::Error(e)),
             },
             Expr::Paren(inner) => self.arg(inner),
@@ -78,17 +90,14 @@ impl Eval<'_> {
             Expr::Text(s) => Value::Text(s.clone()),
             Expr::Bool(b) => Value::Bool(*b),
             Expr::Error(e) => Value::Error(*e),
-            Expr::Ref { sheet, addr } => {
-                if self.local(sheet) {
-                    self.ctx.value(addr.cell()).clone()
-                } else {
-                    Value::Error(ErrorKind::Ref)
-                }
-            }
+            Expr::Ref { sheet, addr } => match self.target(sheet) {
+                Ok(id) => self.ctx.value(id, addr.cell()).clone(),
+                Err(e) => Value::Error(e),
+            },
             Expr::Range(r) => match self.range(r) {
                 // A one-cell range behaves as that cell; larger ranges need
                 // implicit intersection, which is not supported.
-                Ok(range) if range.start == range.end => self.ctx.value(range.start).clone(),
+                Ok((id, range)) if range.start == range.end => self.ctx.value(id, range.start).clone(),
                 Ok(_) => Value::Error(ErrorKind::Value),
                 Err(e) => Value::Error(e),
             },
@@ -160,9 +169,9 @@ impl Eval<'_> {
         for a in args {
             match self.arg(a) {
                 Arg::Value(v) => f(v.to_number()?),
-                Arg::Range(r) => {
+                Arg::Range(id, r) => {
                     let mut err = None;
-                    self.ctx.for_each_value(r, &mut |v| match v {
+                    self.ctx.for_each_value(id, r, &mut |v| match v {
                         Value::Number(n) => {
                             f(*n);
                             true
@@ -187,9 +196,9 @@ impl Eval<'_> {
         for a in args {
             match self.arg(a) {
                 Arg::Value(v) => f(&v)?,
-                Arg::Range(r) => {
+                Arg::Range(id, r) => {
                     let mut res = Ok(());
-                    self.ctx.for_each_value(r, &mut |v| {
+                    self.ctx.for_each_value(id, r, &mut |v| {
                         res = f(v);
                         res.is_ok()
                     });
@@ -244,7 +253,7 @@ impl Eval<'_> {
                                 count += 1;
                             }
                         }
-                        Arg::Range(r) => self.ctx.for_each_value(r, &mut |v| {
+                        Arg::Range(id, r) => self.ctx.for_each_value(id, r, &mut |v| {
                             if matches!(v, Value::Number(_)) {
                                 count += 1;
                             }
@@ -259,7 +268,7 @@ impl Eval<'_> {
                 for a in args {
                     match self.arg(a) {
                         Arg::Value(v) => count += u64::from(!v.is_empty()),
-                        Arg::Range(r) => self.ctx.for_each_value(r, &mut |v| {
+                        Arg::Range(id, r) => self.ctx.for_each_value(id, r, &mut |v| {
                             count += u64::from(!v.is_empty());
                             true
                         }),

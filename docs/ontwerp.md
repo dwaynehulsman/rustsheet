@@ -12,11 +12,12 @@ crates/core   rustsheet-core: engine zonder GUI-afhankelijkheden
               value       waarden, foutwaarden, Excel-coercie en -vergelijking
               formula     tokenizer, Pratt-parser, AST, printen, verschuiven, evaluatie
               deps        omgekeerde afhankelijkheidsindex
-              sheet       ijle celopslag, herberekening in afhankelijkheidsvolgorde
+              sheet       ijle celopslag van één blad, met een vast blad-id
+              workbook    bladen, herberekening over alle bladen in afhankelijkheidsvolgorde
               input       getypte tekst naar celinhoud en terug
               format      getalnotaties, vet, uitlijning, Excel-datums
               clipboard   kopieren/knippen/plakken, tab-gescheiden tekst
-              document    blad + ongedaan maken/opnieuw + opgeslagen-status
+              document    werkmap + ongedaan maken/opnieuw (ook bladbewerkingen) + opgeslagen-status
               io          xlsx (calamine + eigen stijllezer, rust_xlsxwriter) en CSV
 crates/app    rustsheet: de macOS-app (eframe/egui op wgpu/Metal)
 tools/icon    genereert het app-icoon
@@ -87,11 +88,24 @@ berekende waarde en de opmaak.
 - Foutwaarden `#DIV/0!`, `#REF!`, `#NAME?`, `#VALUE!`, `#NUM!`, `#N/A` en `#CIRC!` voor
   kringverwijzingen. Excel toont bij een kring een waarschuwing en 0; een zichtbare foutwaarde
   is duidelijker en propageert naar cellen die de kring lezen.
-- Verwijzingen naar andere bladen geven `#REF!`: een document heeft één blad.
+- Verwijzingen naar andere bladen (`Blad2!A1`, `'Mijn blad'!A1:B9`) worden bij het evalueren
+  op naam opgezocht, hoofdletterongevoelig zoals in Excel. Bestaat het blad niet, dan `#REF!`.
+
+### Bladen
+
+Elk blad heeft een vast id dat hernoemen en verplaatsen overleeft; de afhankelijkheidsgraaf,
+ongedaan-maakstappen en het klembord werken met dat id, niet met de naam. Formules bewaren de
+bladnaam zoals getypt. Hernoemen is daarom één ongedaan-maakbare stap die het blad hernoemt en
+alle formules die de oude naam noemen (op elk blad) herschrijft; verwijderen herschrijft die
+verwijzingen naar `#REF!` en bewaart het hele blad in de stap, zodat ongedaan maken blad én
+formules terugzet. Na toevoegen, verwijderen of hernoemen worden alle formules opnieuw
+geregistreerd en berekend, omdat een naam dan naar een ander blad kan wijzen (een verwijzing
+naar een blad dat nog niet bestond gaat zo vanzelf werken). Dat is zeldzaam en kost bij 400.000
+formules een paar honderd milliseconden.
 
 ### Afhankelijkheden en herberekening
 
-- `deps` houdt per formulecel de precedenten bij en daarnaast een omgekeerde index: losse
+- `deps` houdt per formulecel (blad-id + cel) de precedenten bij en daarnaast een omgekeerde index: losse
   celverwijzingen in een hashmap, bereiken in emmers van 256 rijen x 16 kolommen. Bereiken die
   meer dan 64 emmers raken (hele kolommen) staan op een aparte lijst die lineair doorlopen wordt.
 - Bij een wijziging zoekt een breedte-eerst-doorloop over de omgekeerde index alle formules die
@@ -168,7 +182,13 @@ handelt het rooster zelf af.
 
 ### Vensters
 
-Elk document heeft een eigen native venster (een egui-viewport). Sluiten vraagt om te bewaren
+Elk document heeft een eigen native venster (een egui-viewport), met onderaan een tabbalk voor
+de bladen. Toetsen om van blad te wisselen worden afgehandeld vóór de panelen, zodat de
+scrollbare tabbalk ze niet opeet. Tijdens het typen van een formule blijft de bewerking bij het
+oorspronkelijke blad horen; wissel je van tab, dan gaat het typen verder in de formulebalk en
+voegt een klik op een cel een verwijzing met bladnaam in.
+
+ Sluiten vraagt om te bewaren
 bij wijzigingen. Het hoofdvenster kan in eframe niet los sluiten zolang er andere zijn; dan neemt
 het het volgende document over en sluit dat venster. Grote bestanden worden op een
 achtergrondthread gelezen, zodat vensters blijven reageren.

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rustsheet_core::Sheet;
+use rustsheet_core::Workbook;
 
 use crate::view::SheetView;
 
@@ -39,8 +39,8 @@ impl Bench {
         }
     }
 
-    pub fn loaded(&mut self, path: &Path, took: Duration, sheet: &Sheet) {
-        self.load = Some((path.display().to_string(), took, sheet.cell_count(), sheet.formula_count()));
+    pub fn loaded(&mut self, path: &Path, took: Duration, book: &Workbook) {
+        self.load = Some((path.display().to_string(), took, book.cell_count(), book.formula_count()));
     }
 
     /// Advances one frame; returns true when the run is finished.

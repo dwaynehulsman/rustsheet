@@ -7,7 +7,7 @@ mod xlsx;
 use std::fmt;
 use std::path::Path;
 
-use crate::sheet::Sheet;
+use crate::workbook::Workbook;
 
 pub use self::csv::{read_csv, read_csv_str, write_csv, write_csv_string};
 pub use self::xlsx::{read_workbook, write_xlsx};
@@ -64,8 +64,9 @@ fn sheet_name_from(path: &Path) -> String {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or("Blad1").to_string()
 }
 
-/// Opens a file by extension. Workbooks load their first worksheet.
-pub fn open(path: &Path) -> Result<Sheet, IoError> {
+/// Opens a file by extension. Workbooks load every worksheet; CSV gives
+/// one sheet named after the file.
+pub fn open(path: &Path) -> Result<Workbook, IoError> {
     match FileKind::of(path) {
         Some(FileKind::Csv) => read_csv(path, &sheet_name_from(path)),
         Some(FileKind::Xlsx | FileKind::OtherWorkbook) => read_workbook(path),
@@ -75,10 +76,11 @@ pub fn open(path: &Path) -> Result<Sheet, IoError> {
     }
 }
 
-/// Saves by extension: `.csv` as CSV, anything else as xlsx.
-pub fn save(sheet: &Sheet, path: &Path) -> Result<(), IoError> {
+/// Saves by extension: `.csv` writes sheet `active` (CSV has no sheets),
+/// anything else writes the whole workbook as xlsx.
+pub fn save(book: &Workbook, path: &Path, active: usize) -> Result<(), IoError> {
     match FileKind::of(path) {
-        Some(FileKind::Csv) => write_csv(sheet, path),
-        _ => write_xlsx(sheet, path),
+        Some(FileKind::Csv) => write_csv(book.sheet(active.min(book.len() - 1)), path),
+        _ => write_xlsx(book, path),
     }
 }

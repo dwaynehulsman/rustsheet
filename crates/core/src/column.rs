@@ -11,7 +11,7 @@ const MASK: u32 = PAGE as u32 - 1;
 /// many cells, so scattered cells cost about their own size, not a page each.
 const SPARSE_MAX: usize = 8;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Page {
     /// Up to [`SPARSE_MAX`] cells as (slot, cell), sorted by slot.
     Sparse(Vec<(u8, Cell)>),
@@ -101,7 +101,7 @@ impl Page {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Column {
     pages: Vec<Option<Page>>,
     len: usize,

@@ -1,21 +1,21 @@
 //! End-to-end formula behaviour: typed input in, displayed value out.
 
-use rustsheet_core::{CellRef, CellState, Sheet, Value, parse_input};
+use rustsheet_core::{CellRef, CellState, Sheet, Value, Workbook, parse_input};
 
 fn c(s: &str) -> CellRef {
     CellRef::parse(s).unwrap()
 }
 
-fn set(sheet: &mut Sheet, at: &str, text: &str) {
+fn set(book: &mut Workbook, at: &str, text: &str) {
     let parsed = parse_input(text).unwrap_or_else(|e| panic!("{text}: {e}"));
     let format = rustsheet_core::CellFormat { num: parsed.format.unwrap_or_default(), ..Default::default() };
-    sheet.set_states(vec![(c(at), CellState { content: parsed.content, format })]);
+    book.set_states(0, vec![(c(at), CellState { content: parsed.content, format })]);
 }
 
 /// Evaluates a formula in a scratch cell of `sheet`.
-fn eval_in(sheet: &mut Sheet, formula: &str) -> String {
-    set(sheet, "Z100", formula);
-    sheet.display(c("Z100"))
+fn eval_in(book: &mut Workbook, formula: &str) -> String {
+    set(book, "Z100", formula);
+    book.sheet(0).display(c("Z100"))
 }
 
 fn eval(formula: &str) -> String {
@@ -23,8 +23,8 @@ fn eval(formula: &str) -> String {
 }
 
 /// A1:A5 = 1..5, B1 = "tekst", B2 = TRUE, B3 = "7", C1 = 0
-fn sample() -> Sheet {
-    let mut s = Sheet::new("Blad1");
+fn sample() -> Workbook {
+    let mut s = Workbook::new();
     for i in 1..=5 {
         set(&mut s, &format!("A{i}"), &i.to_string());
     }
@@ -125,37 +125,37 @@ fn error_values() {
 
 #[test]
 fn circular_references() {
-    let mut s = Sheet::new("Blad1");
+    let mut s = Workbook::new();
     set(&mut s, "A1", "=A1+1");
-    assert_eq!(s.display(c("A1")), "#CIRC!");
+    assert_eq!(s.sheet(0).display(c("A1")), "#CIRC!");
 
     set(&mut s, "B1", "=B3");
     set(&mut s, "B2", "=B1+1");
     set(&mut s, "B3", "=B2*2");
     for at in ["B1", "B2", "B3"] {
-        assert_eq!(s.display(c(at)), "#CIRC!", "{at}");
+        assert_eq!(s.sheet(0).display(c(at)), "#CIRC!", "{at}");
     }
     // A cell that only reads the cycle gets the error, but is not part of it.
     set(&mut s, "C1", "=B1");
-    assert_eq!(s.display(c("C1")), "#CIRC!");
+    assert_eq!(s.sheet(0).display(c("C1")), "#CIRC!");
     set(&mut s, "C2", "=SUM(B1:B3)");
-    assert_eq!(s.display(c("C2")), "#CIRC!");
+    assert_eq!(s.sheet(0).display(c("C2")), "#CIRC!");
 
     // Breaking the cycle recovers every cell.
     set(&mut s, "B1", "5");
-    assert_eq!(s.display(c("B2")), "6");
-    assert_eq!(s.display(c("B3")), "12");
-    assert_eq!(s.display(c("C1")), "5");
-    assert_eq!(s.display(c("C2")), "23");
+    assert_eq!(s.sheet(0).display(c("B2")), "6");
+    assert_eq!(s.sheet(0).display(c("B3")), "12");
+    assert_eq!(s.sheet(0).display(c("C1")), "5");
+    assert_eq!(s.sheet(0).display(c("C2")), "23");
 
     // A range that includes its own cell is circular too.
     set(&mut s, "D5", "=SUM(D1:D10)");
-    assert_eq!(s.display(c("D5")), "#CIRC!");
+    assert_eq!(s.sheet(0).display(c("D5")), "#CIRC!");
 }
 
 #[test]
 fn only_affected_cells_recalculate() {
-    let mut s = Sheet::new("Blad1");
+    let mut s = Workbook::new();
     for i in 1..=100 {
         set(&mut s, &format!("A{i}"), &i.to_string());
         set(&mut s, &format!("B{i}"), &format!("=A{i}*2"));
@@ -163,12 +163,12 @@ fn only_affected_cells_recalculate() {
     set(&mut s, "C1", "=SUM(B1:B100)");
     set(&mut s, "D1", "=C1+1");
     set(&mut s, "E1", "=A100");
-    assert_eq!(s.display(c("D1")), "10101");
+    assert_eq!(s.sheet(0).display(c("D1")), "10101");
 
     // Changing A50 touches B50, C1 and D1 and nothing else.
     set(&mut s, "A50", "0");
     assert_eq!(s.last_recalc_count(), 3);
-    assert_eq!(s.display(c("D1")), "10001");
+    assert_eq!(s.sheet(0).display(c("D1")), "10001");
 
     // A value nobody reads triggers no formulas at all.
     set(&mut s, "Z1", "42");
@@ -177,27 +177,27 @@ fn only_affected_cells_recalculate() {
     // Editing a formula evaluates it and its dependents only.
     set(&mut s, "C1", "=SUM(B1:B10)");
     assert_eq!(s.last_recalc_count(), 2);
-    assert_eq!(s.display(c("D1")), "111");
+    assert_eq!(s.sheet(0).display(c("D1")), "111");
     // The old range no longer triggers C1.
     set(&mut s, "A60", "1");
     assert_eq!(s.last_recalc_count(), 1);
-    assert_eq!(s.display(c("D1")), "111");
+    assert_eq!(s.sheet(0).display(c("D1")), "111");
 }
 
 #[test]
 fn long_chains_do_not_overflow_the_stack() {
-    let mut s = Sheet::new("Blad1");
-    set(&mut s, "A1", "1");
+    let mut sheet = Sheet::new("Blad1");
+    sheet.put(c("A1"), CellState { content: parse_input("1").unwrap().content, ..Default::default() });
     for i in 2..=100_000 {
         let at = CellRef::new(i - 1, 0);
         let content = parse_input(&format!("=A{}+1", i - 1)).unwrap().content;
-        s.put(at, CellState { content, ..Default::default() });
+        sheet.put(at, CellState { content, ..Default::default() });
     }
-    s.recalc_all();
-    assert_eq!(s.value(c("A100000")), &Value::Number(100_000.0));
+    let mut s = Workbook::from_sheets(vec![sheet]);
+    assert_eq!(s.sheet(0).value(c("A100000")), &Value::Number(100_000.0));
     set(&mut s, "A1", "10");
     assert_eq!(s.last_recalc_count(), 99_999);
-    assert_eq!(s.value(c("A100000")), &Value::Number(100_009.0));
+    assert_eq!(s.sheet(0).value(c("A100000")), &Value::Number(100_009.0));
 }
 
 #[test]
@@ -205,15 +205,15 @@ fn deleting_a_cell_updates_dependents() {
     let mut s = sample();
     set(&mut s, "D1", "=A1+A2");
     set(&mut s, "A1", "");
-    assert_eq!(s.display(c("D1")), "2");
+    assert_eq!(s.sheet(0).display(c("D1")), "2");
 }
 
 #[test]
 fn longest_formula_chain_evaluates() {
     // 4096 terms is the longest chain that fits Excel's 8192 character limit.
     let formula = format!("={}", vec!["1"; 4096].join("+"));
-    let mut s = Sheet::new("Blad1");
+    let mut s = Workbook::new();
     set(&mut s, "A1", &formula);
-    assert_eq!(s.display(c("A1")), "4096");
-    assert_eq!(s.state(c("A1")).content.source(), formula);
+    assert_eq!(s.sheet(0).display(c("A1")), "4096");
+    assert_eq!(s.sheet(0).state(c("A1")).content.source(), formula);
 }

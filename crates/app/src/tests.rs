@@ -2,7 +2,8 @@
 
 use egui::{Event, Key, Modifiers, PointerButton};
 use egui_kittest::Harness;
-use rustsheet_core::{CellRef, Document, Sheet, Value};
+use egui_kittest::kittest::Queryable;
+use rustsheet_core::{CellRef, Document, Value, Workbook};
 
 use crate::clip::ClipState;
 use crate::menu::Command;
@@ -18,7 +19,7 @@ struct State {
 fn harness<'a>() -> Harness<'a, State> {
     let state = State {
         fonts_ready: false,
-        view: SheetView::new(Document::new(Sheet::new("Blad1")), None, 1),
+        view: SheetView::new(Document::new(Workbook::new()), None, 1),
         clip: ClipState::detached(),
         requests: Vec::new(),
     };
@@ -65,7 +66,7 @@ fn command(h: &mut Harness<'_, State>, command: Command) {
 }
 
 fn shown(h: &Harness<'_, State>, at: &str) -> String {
-    h.state().view.doc.sheet.display(c(at))
+    h.state().view.sheet().display(c(at))
 }
 
 fn click(h: &mut Harness<'_, State>, at: &str, modifiers: Modifiers) {
@@ -161,7 +162,7 @@ fn bad_formula_keeps_editing_with_message() {
     let view = &h.state().view;
     assert!(view.edit.is_some());
     assert!(view.status.as_deref().is_some_and(|s| s.starts_with("Formule klopt niet")));
-    assert_eq!(view.doc.sheet.display(c("A1")), "");
+    assert_eq!(view.sheet().display(c("A1")), "");
 }
 
 #[test]
@@ -175,14 +176,14 @@ fn copy_paste_shifts_references_and_cut_moves() {
     command(&mut h, Command::Copy);
     click(&mut h, "B3", Modifiers::NONE);
     command(&mut h, Command::Paste);
-    assert_eq!(h.state().view.doc.sheet.state(c("B3")).content.source(), "=A3*10");
+    assert_eq!(h.state().view.sheet().state(c("B3")).content.source(), "=A3*10");
 
     // Cut keeps references and empties the source.
     click(&mut h, "B1", Modifiers::NONE);
     command(&mut h, Command::Cut);
     click(&mut h, "D5", Modifiers::NONE);
     command(&mut h, Command::Paste);
-    assert_eq!(h.state().view.doc.sheet.state(c("D5")).content.source(), "=A1*10");
+    assert_eq!(h.state().view.sheet().state(c("D5")).content.source(), "=A1*10");
     assert_eq!(shown(&h, "D5"), "50");
     assert_eq!(shown(&h, "B1"), "");
     // One undo restores both the source and the target.
@@ -198,7 +199,7 @@ fn paste_from_another_app_reads_tab_separated_values() {
     click(&mut h, "B2", Modifiers::NONE);
     command(&mut h, Command::Paste);
     assert_eq!(shown(&h, "B2"), "Naam");
-    assert_eq!(h.state().view.doc.sheet.value(c("C3")), &Value::Number(2.5));
+    assert_eq!(h.state().view.sheet().value(c("C3")), &Value::Number(2.5));
     assert_eq!(h.state().view.sel.range().to_string(), "B2:C3");
 }
 
@@ -209,9 +210,9 @@ fn shift_click_extends_selection_and_formats_apply() {
     click(&mut h, "C4", Modifiers::SHIFT);
     assert_eq!(h.state().view.sel.range().to_string(), "B2:C4");
     command(&mut h, Command::Bold);
-    assert!(h.state().view.doc.sheet.format(c("C3")).bold);
+    assert!(h.state().view.sheet().format(c("C3")).bold);
     command(&mut h, Command::NumFmt(rustsheet_core::NumFmt::Percent));
-    assert_eq!(h.state().view.doc.sheet.format(c("B4")).num, rustsheet_core::NumFmt::Percent);
+    assert_eq!(h.state().view.sheet().format(c("B4")).num, rustsheet_core::NumFmt::Percent);
 }
 
 #[test]
@@ -282,8 +283,135 @@ fn dragging_a_column_border_resizes_and_undoes() {
         modifiers: Modifiers::NONE,
     });
     h.run();
-    let width = h.state().view.doc.sheet.col_width(0);
+    let width = h.state().view.sheet().col_width(0);
     assert!((width - (rustsheet_core::sheet::DEFAULT_COL_WIDTH + 60.0)).abs() < 1.0, "width {width}");
     command(&mut h, Command::Undo);
-    assert_eq!(h.state().view.doc.sheet.custom_col_width(0), None);
+    assert_eq!(h.state().view.sheet().custom_col_width(0), None);
+}
+
+fn sheet_names(h: &Harness<'_, State>) -> Vec<String> {
+    h.state().view.doc.book.sheets().iter().map(|s| s.name().to_string()).collect()
+}
+
+fn current_sheet(h: &Harness<'_, State>) -> String {
+    h.state().view.sheet().name().to_string()
+}
+
+#[test]
+fn tabs_add_switch_and_keep_their_own_cells() {
+    let mut h = harness();
+    text(&mut h, "op blad 1");
+    key(&mut h, Key::Enter);
+    h.get_by_label("Nieuw blad").click();
+    h.run();
+    assert_eq!(sheet_names(&h), ["Blad1", "Blad2"]);
+    assert_eq!(current_sheet(&h), "Blad2");
+    assert_eq!(shown(&h, "A1"), "");
+    text(&mut h, "op blad 2");
+    key(&mut h, Key::Enter);
+
+    // Ctrl+Page Up/Down and Cmd+Option+arrows switch sheets.
+    key_mod(&mut h, Modifiers::CTRL, Key::PageUp);
+    assert_eq!(current_sheet(&h), "Blad1");
+    assert_eq!(shown(&h, "A1"), "op blad 1");
+    // Each sheet remembers its own selection.
+    assert_eq!(h.state().view.sel.active, c("A2"));
+    key_mod(&mut h, Modifiers::COMMAND | Modifiers::ALT, Key::ArrowRight);
+    assert_eq!(current_sheet(&h), "Blad2");
+    assert_eq!(shown(&h, "A1"), "op blad 2");
+
+    // Clicking a tab switches too.
+    h.get_by_label("Blad1").click();
+    h.run();
+    assert_eq!(current_sheet(&h), "Blad1");
+}
+
+#[test]
+fn formulas_point_at_cells_on_other_tabs() {
+    let mut h = harness();
+    command(&mut h, Command::AddSheet);
+    text(&mut h, "21");
+    key(&mut h, Key::Enter);
+    h.get_by_label("Blad1").click();
+    h.run();
+
+    // Type "=", click the Blad2 tab and a cell there, then "*2" and Enter.
+    text(&mut h, "=");
+    h.get_by_label("Blad2").click();
+    h.run();
+    assert_eq!(current_sheet(&h), "Blad2");
+    click(&mut h, "A1", Modifiers::NONE);
+    text(&mut h, "*2");
+    assert_eq!(h.state().view.edit.as_ref().map(|e| e.text.as_str()), Some("=Blad2!A1*2"));
+    key(&mut h, Key::Enter);
+    assert_eq!(current_sheet(&h), "Blad1");
+    assert_eq!(shown(&h, "A1"), "42");
+    assert_eq!(h.state().view.sheet().state(c("A1")).content.source(), "=Blad2!A1*2");
+}
+
+#[test]
+fn renaming_a_tab_updates_formulas() {
+    let mut h = harness();
+    command(&mut h, Command::AddSheet);
+    text(&mut h, "5");
+    key(&mut h, Key::Enter);
+    key_mod(&mut h, Modifiers::CTRL, Key::PageUp);
+    text(&mut h, "=Blad2!A1+1");
+    key(&mut h, Key::Enter);
+
+    // Renaming (double-click on the tab, or the menu) selects the old name; typing replaces it.
+    key_mod(&mut h, Modifiers::CTRL, Key::PageDown);
+    command(&mut h, Command::RenameSheet);
+    assert!(h.state().view.rename.is_some());
+    text(&mut h, "Mijn kosten");
+    key(&mut h, Key::Enter);
+    assert_eq!(sheet_names(&h), ["Blad1", "Mijn kosten"]);
+    let first = h.state().view.doc.book.sheet(0);
+    assert_eq!(first.state(c("A1")).content.source(), "='Mijn kosten'!A1+1");
+    assert_eq!(first.display(c("A1")), "6");
+
+    // A name that is taken is refused and the field stays open.
+    command(&mut h, Command::RenameSheet);
+    text(&mut h, "blad1");
+    key(&mut h, Key::Enter);
+    assert!(h.state().view.rename.is_some());
+    assert!(h.state().view.status.as_deref().is_some_and(|s| s.contains("al een blad")));
+    key(&mut h, Key::Escape);
+    assert!(h.state().view.rename.is_none());
+    assert_eq!(sheet_names(&h), ["Blad1", "Mijn kosten"]);
+
+    // Undo puts the old name and formulas back.
+    command(&mut h, Command::Undo);
+    assert_eq!(sheet_names(&h), ["Blad1", "Blad2"]);
+    assert_eq!(h.state().view.doc.book.sheet(0).state(c("A1")).content.source(), "=Blad2!A1+1");
+}
+
+#[test]
+fn tab_context_menu_duplicates_and_deletes() {
+    let mut h = harness();
+    text(&mut h, "x");
+    key(&mut h, Key::Enter);
+    h.get_by_label("Blad1").click_secondary();
+    h.run();
+    h.get_by_label("Dupliceer").click();
+    h.run();
+    assert_eq!(sheet_names(&h), ["Blad1", "Blad1 (2)"]);
+    assert_eq!(current_sheet(&h), "Blad1 (2)");
+    assert_eq!(shown(&h, "A1"), "x");
+
+    h.get_by_label("Blad1 (2)").click_secondary();
+    h.run();
+    h.get_by_label("Verwijder").click();
+    h.run();
+    assert_eq!(sheet_names(&h), ["Blad1"]);
+    assert_eq!(current_sheet(&h), "Blad1");
+
+    // The last sheet cannot be deleted.
+    command(&mut h, Command::DeleteSheet);
+    assert_eq!(sheet_names(&h), ["Blad1"]);
+
+    // Undoing the delete brings the sheet back and shows it.
+    command(&mut h, Command::Undo);
+    assert_eq!(sheet_names(&h), ["Blad1", "Blad1 (2)"]);
+    assert_eq!(current_sheet(&h), "Blad1 (2)");
 }

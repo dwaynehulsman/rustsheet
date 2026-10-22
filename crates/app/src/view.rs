@@ -1,13 +1,15 @@
 //! One document window: toolbar, formula bar, grid and status bar, plus the
 //! selection and editing state behind them.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use egui::{Event, Key, Modifiers, Ui};
 use rustsheet_core::clipboard::{Block, to_tsv};
+use rustsheet_core::formula::sheet_prefix;
 use rustsheet_core::{
     Align, CellFormat, CellRef, CellState, Change, Content, Document, MAX_COLS, MAX_ROWS, NumFmt, Range,
-    Sheet, Value, edit_text, parse_input,
+    Sheet, SheetId, Spot, Value, edit_text, parse_input,
 };
 
 use crate::clip::{ClipState, CutSource, Pasted};
@@ -54,6 +56,9 @@ impl Selection {
 }
 
 pub struct Edit {
+    /// The sheet being edited; while pointing at cells for a formula the
+    /// view may show another sheet.
+    pub sheet: SheetId,
     pub cell: CellRef,
     pub text: String,
     /// Started by typing over the cell: arrow keys commit and move, like Excel.
@@ -69,6 +74,13 @@ pub struct Edit {
     pub point: Option<(usize, CellRef)>,
 }
 
+/// A sheet tab being renamed in place.
+pub struct Rename {
+    pub sheet: SheetId,
+    pub text: String,
+    pub focus_pending: bool,
+}
+
 /// Cached sum/average/count of the selection for the status bar.
 struct Stats {
     key: (Range, u64),
@@ -81,6 +93,14 @@ pub struct SheetView {
     pub doc: Document,
     pub path: Option<PathBuf>,
     pub untitled: usize,
+    /// The sheet shown in this window.
+    pub sheet: SheetId,
+    /// Its position, to pick a neighbour when it disappears.
+    sheet_index: usize,
+    /// Selection and scroll position of the other sheets, restored when
+    /// switching back to them.
+    sheet_views: HashMap<SheetId, (Selection, (f64, f64))>,
+    pub rename: Option<Rename>,
     pub sel: Selection,
     /// Scroll offset in points; f64 because a million rows exceed f32 precision.
     pub scroll: (f64, f64),
@@ -101,10 +121,15 @@ pub struct SheetView {
 
 impl SheetView {
     pub fn new(doc: Document, path: Option<PathBuf>, untitled: usize) -> Self {
+        let sheet = doc.book.sheet(0).id();
         Self {
             doc,
             path,
             untitled,
+            sheet,
+            sheet_index: 0,
+            sheet_views: HashMap::new(),
+            rename: None,
             sel: Selection::single(CellRef::default()),
             scroll: (0.0, 0.0),
             edit: None,
@@ -122,7 +147,63 @@ impl SheetView {
     }
 
     pub fn sheet(&self) -> &Sheet {
-        &self.doc.sheet
+        self.doc.book.sheet_by_id(self.sheet).unwrap_or_else(|| self.doc.book.sheet(0))
+    }
+
+    /// Shows sheet `id`, remembering where we were on the current one.
+    pub fn show_sheet(&mut self, id: SheetId) {
+        let Some(index) = self.doc.book.index_of(id) else { return };
+        self.sheet_index = index;
+        if id == self.sheet {
+            return;
+        }
+        self.sheet_views.insert(self.sheet, (self.sel, self.scroll));
+        self.sheet = id;
+        let (sel, scroll) =
+            self.sheet_views.get(&id).copied().unwrap_or((Selection::single(CellRef::default()), (0.0, 0.0)));
+        self.sel = sel;
+        self.scroll = scroll;
+        self.drag = crate::grid::Drag::None;
+        self.stats = None;
+        if self.edit.is_none() {
+            self.grid_focus_pending = true;
+        }
+    }
+
+    /// Moves to the next (`1`) or previous (`-1`) sheet tab.
+    pub fn switch_sheet_by(&mut self, delta: i64) {
+        let len = self.doc.book.len() as i64;
+        let index = (self.sheet_index as i64 + delta).clamp(0, len - 1) as usize;
+        let id = self.doc.book.sheet(index).id();
+        self.show_sheet(id);
+    }
+
+    /// Picks a neighbouring sheet when the shown one was deleted (or its
+    /// creation undone).
+    fn sync_sheet(&mut self) {
+        match self.doc.book.index_of(self.sheet) {
+            Some(index) => self.sheet_index = index,
+            None => {
+                let index = self.sheet_index.min(self.doc.book.len() - 1);
+                let id = self.doc.book.sheet(index).id();
+                self.sheet_views.remove(&self.sheet);
+                self.sheet = id;
+                let (sel, scroll) = self
+                    .sheet_views
+                    .get(&id)
+                    .copied()
+                    .unwrap_or((Selection::single(CellRef::default()), (0.0, 0.0)));
+                self.sel = sel;
+                self.scroll = scroll;
+                self.stats = None;
+            }
+        }
+        if self.edit.as_ref().is_some_and(|e| self.doc.book.index_of(e.sheet).is_none()) {
+            self.edit = None;
+        }
+        if self.rename.as_ref().is_some_and(|r| self.doc.book.index_of(r.sheet).is_none()) {
+            self.rename = None;
+        }
     }
 
     /// The name shown in the title bar.
@@ -159,8 +240,11 @@ impl SheetView {
     // ----- frame -----
 
     pub fn ui(&mut self, ui: &mut Ui, env: &mut Env<'_>) {
+        self.sync_sheet();
+        self.sheet_keys(ui);
         for command in std::mem::take(&mut self.pending) {
             self.run(command, ui, env);
+            self.sync_sheet();
         }
         let palette = crate::grid::Palette::new(ui.visuals().dark_mode);
         egui::Panel::top(("toolbar", env.window))
@@ -173,9 +257,38 @@ impl SheetView {
         egui::Panel::bottom(("status", env.window))
             .frame(egui::Frame::new().fill(palette.chrome).inner_margin(egui::Margin::symmetric(10, 3)))
             .show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom(("tabs", env.window))
+            .frame(egui::Frame::new().fill(palette.chrome).inner_margin(egui::Margin::symmetric(6, 3)))
+            .show(ui, |ui| self.tab_bar(ui, env));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.background))
             .show(ui, |ui| self.grid(ui, env));
+    }
+
+    /// Ctrl+Page Up/Down and Cmd+Option+arrows switch sheets. Handled before
+    /// any panel so scroll areas cannot swallow them; while typing a formula
+    /// they let you point at the other sheet.
+    fn sheet_keys(&mut self, ui: &Ui) {
+        if self.rename.is_some() || (self.edit.is_some() && !self.wants_reference()) {
+            return;
+        }
+        let delta = ui.ctx().input_mut(|i| {
+            let pos = i.events.iter().position(|e| {
+                matches!(e, Event::Key { key, pressed: true, modifiers: m, .. }
+                    if (m.ctrl && matches!(key, Key::PageUp | Key::PageDown))
+                        || (m.command && m.alt && matches!(key, Key::ArrowLeft | Key::ArrowRight)))
+            })?;
+            match i.events.remove(pos) {
+                Event::Key { key: Key::PageUp | Key::ArrowLeft, .. } => Some(-1),
+                _ => Some(1),
+            }
+        });
+        let Some(delta) = delta else { return };
+        if self.edit.is_some() {
+            self.switch_sheet_while_editing(delta);
+        } else {
+            self.switch_sheet_by(delta);
+        }
     }
 
     /// Runs a menu or toolbar command. While a cell is being edited, the
@@ -190,6 +303,12 @@ impl SheetView {
                 Command::Undo => Some(key_event(Key::Z, Modifiers::COMMAND)),
                 Command::Redo => Some(key_event(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)),
                 Command::Delete => None,
+                // Switching sheets while typing a formula lets you point at
+                // cells on the other sheet.
+                Command::NextSheet | Command::PrevSheet if self.wants_reference() => {
+                    self.switch_sheet_while_editing(if command == Command::NextSheet { 1 } else { -1 });
+                    return;
+                }
                 _ => {
                     // Formatting applies after the edit is committed.
                     if !self.commit_edit() {
@@ -206,15 +325,36 @@ impl SheetView {
         }
         match command {
             Command::Undo => {
-                if let Some(selection) = self.doc.undo() {
-                    self.restore_selection(selection);
+                if let Some(spot) = self.doc.undo() {
+                    self.restore_spot(spot);
                 }
             }
             Command::Redo => {
-                if let Some(selection) = self.doc.redo() {
-                    self.restore_selection(selection);
+                if let Some(spot) = self.doc.redo() {
+                    self.restore_spot(spot);
                 }
             }
+            Command::AddSheet => {
+                let id = self.doc.add_sheet(self.sheet_index + 1);
+                self.show_sheet(id);
+            }
+            Command::DuplicateSheet => {
+                if let Some(id) = self.doc.duplicate_sheet(self.sheet) {
+                    let (sel, scroll) = (self.sel, self.scroll);
+                    self.show_sheet(id);
+                    (self.sel, self.scroll) = (sel, scroll);
+                }
+            }
+            Command::DeleteSheet => match self.doc.delete_sheet(self.sheet) {
+                Ok(()) => self.sync_sheet(),
+                Err(e) => self.status = Some(e),
+            },
+            Command::RenameSheet => {
+                let text = self.sheet().name().to_string();
+                self.rename = Some(Rename { sheet: self.sheet, text, focus_pending: true });
+            }
+            Command::NextSheet => self.switch_sheet_by(1),
+            Command::PrevSheet => self.switch_sheet_by(-1),
             Command::Copy => self.copy(env, false),
             Command::Cut => self.copy(env, true),
             Command::Paste => self.paste(env),
@@ -233,8 +373,12 @@ impl SheetView {
         }
     }
 
-    fn restore_selection(&mut self, selection: Option<Range>) {
-        if let Some(r) = selection {
+    /// After undo or redo: show the sheet that changed and select the cells.
+    fn restore_spot(&mut self, spot: Option<Spot>) {
+        self.sync_sheet();
+        let Some(spot) = spot else { return };
+        self.show_sheet(spot.sheet);
+        if let Some(r) = spot.range {
             self.sel = Selection::span(r.start, r.end);
             self.scroll_into_view = true;
         }
@@ -249,8 +393,16 @@ impl SheetView {
             let state = self.sheet().state(cell);
             edit_text(&state.content, state.format.num)
         });
-        self.edit =
-            Some(Edit { cell, text, typed, in_bar, focus_pending: true, cursor_to_end: true, point: None });
+        self.edit = Some(Edit {
+            sheet: self.sheet,
+            cell,
+            text,
+            typed,
+            in_bar,
+            focus_pending: true,
+            cursor_to_end: true,
+            point: None,
+        });
         self.status = None;
         self.scroll_into_view = true;
     }
@@ -259,16 +411,19 @@ impl SheetView {
     /// formula does not parse.
     pub fn commit_edit(&mut self) -> bool {
         let Some(edit) = self.edit.take() else { return true };
+        let Some(sheet) = self.doc.book.sheet_by_id(edit.sheet) else { return true };
         match parse_input(&edit.text) {
             Ok(parsed) => {
-                let mut state = self.sheet().state(edit.cell);
+                let mut state = sheet.state(edit.cell);
                 state.content = parsed.content;
                 if let Some(num) = parsed.format
                     && state.format.num == NumFmt::General
                 {
                     state.format.num = num;
                 }
-                self.doc.set_cells(vec![(edit.cell, state)], Some(self.sel.range()));
+                // Pointing at another sheet ends back on the edited one.
+                self.show_sheet(edit.sheet);
+                self.doc.set_cells(edit.sheet, vec![(edit.cell, state)], Some(self.sel.range()));
                 self.status = None;
                 self.grid_focus_pending = true;
                 true
@@ -313,9 +468,29 @@ impl SheetView {
         };
         let anchor = edit.point.map_or(from, |(_, a)| a);
         edit.text.truncate(start);
+        if edit.sheet != self.sheet {
+            let name = self.doc.book.sheet_by_id(self.sheet).map_or("", |s| s.name());
+            edit.text.push_str(&sheet_prefix(name));
+        }
         edit.text.push_str(&Range::new(anchor, to).to_string());
         edit.focus_pending = true;
         edit.cursor_to_end = true;
+    }
+
+    /// Shows another sheet while a formula is being typed; typing goes on
+    /// in the formula bar and clicks insert references to that sheet.
+    pub fn switch_sheet_while_editing(&mut self, delta: i64) {
+        self.switch_sheet_by(delta);
+        self.after_sheet_switch_while_editing();
+    }
+
+    fn after_sheet_switch_while_editing(&mut self) {
+        if let Some(edit) = &mut self.edit {
+            edit.in_bar = true;
+            edit.focus_pending = true;
+            edit.cursor_to_end = true;
+            edit.point = None;
+        }
     }
 
     pub fn end_point(&mut self) {
@@ -400,7 +575,7 @@ impl SheetView {
                 (at, state)
             })
             .collect();
-        self.doc.set_cells(changes, Some(self.sel.range()));
+        self.doc.set_cells(self.sheet, changes, Some(self.sel.range()));
     }
 
     fn clear_selection(&mut self) {
@@ -410,14 +585,14 @@ impl SheetView {
             .filter(|(_, cell)| !cell.content.is_empty())
             .map(|(at, cell)| (at, CellState { content: Content::Empty, format: cell.format }))
             .collect();
-        self.doc.set_cells(changes, Some(self.sel.range()));
+        self.doc.set_cells(self.sheet, changes, Some(self.sel.range()));
     }
 
     fn copy(&mut self, env: &mut Env<'_>, cut: bool) {
         let range = self.sel.range();
         let block = Block::copy(self.sheet(), range);
         let text = to_tsv(self.sheet(), range);
-        let source = cut.then_some(CutSource { window: env.window, range });
+        let source = cut.then_some(CutSource { window: env.window, sheet: self.sheet, range });
         env.clip.set(block, text, source);
         self.status = Some(if cut { "Geknipt" } else { "Gekopieerd" }.to_string());
     }
@@ -428,32 +603,47 @@ impl SheetView {
             Pasted::Internal(block, cut) => (block, cut),
             Pasted::External(block) => (block, None),
         };
-        let mut changes = Vec::new();
+        let mut parts = Vec::new();
         if let Some(cut) = cut {
             if cut.window == env.window {
-                changes.extend(self.sheet().cells_in(cut.range).map(|(at, _)| (at, CellState::default())));
+                // Clear the source first (possibly on another sheet), then
+                // paste; one undo step for both.
+                if let Some(source) = self.doc.book.sheet_by_id(cut.sheet) {
+                    let clear =
+                        source.cells_in(cut.range).map(|(at, _)| (at, CellState::default())).collect();
+                    parts.push(Change::Cells(cut.sheet, clear));
+                }
             } else {
                 env.requests.push(Request::ClearCut(cut));
             }
         }
         let (area, pasted) = block.paste(self.sheet(), self.sel.range(), cut.is_some());
-        changes.extend(pasted);
-        self.doc.set_cells(changes, Some(self.sel.range()));
+        parts.push(Change::Cells(self.sheet, pasted));
+        self.doc.apply(Change::Batch(parts), Some(Spot { sheet: self.sheet, range: Some(self.sel.range()) }));
         self.sel = Selection::span(area.start, area.end);
         self.status = None;
     }
 
     /// Clears the source of a cut that was pasted in another window.
-    pub fn clear_cut_source(&mut self, range: Range) {
-        let changes = self.sheet().cells_in(range).map(|(at, _)| (at, CellState::default())).collect();
-        self.doc.set_cells(changes, Some(range));
+    pub fn clear_cut_source(&mut self, sheet: SheetId, range: Range) {
+        let Some(source) = self.doc.book.sheet_by_id(sheet) else { return };
+        let changes = source.cells_in(range).map(|(at, _)| (at, CellState::default())).collect();
+        self.doc.set_cells(sheet, changes, Some(range));
     }
 
     pub fn set_column_width(&mut self, col: u32, original: Option<f32>, width: Option<f32>) {
         // The drag already changed the sheet; put the original back so the
         // undo step records the right "before".
-        self.doc.sheet.set_col_width(col, original);
-        self.doc.apply(Change::ColWidths(vec![(col, width)]), None);
+        self.doc.book.set_col_width(self.sheet, col, original);
+        self.doc.apply(
+            Change::ColWidths(self.sheet, vec![(col, width)]),
+            Some(Spot { sheet: self.sheet, range: None }),
+        );
+    }
+
+    /// Changes a column width while dragging, without an undo step.
+    pub fn preview_column_width(&mut self, col: u32, width: Option<f32>) {
+        self.doc.book.set_col_width(self.sheet, col, width);
     }
 
     // ----- bars -----
@@ -535,6 +725,22 @@ impl SheetView {
                 let state = self.sheet().state(self.sel.active);
                 self.bar_text = edit_text(&state.content, state.format.num);
             }
+            let (grid_id, ..) = self.ids(env.window);
+            if let Some(edit) = &mut self.edit
+                && edit.in_bar
+            {
+                // Clicking a cell to point at it moves focus to the grid;
+                // take it back so typing continues here.
+                let focus = ui.memory(|m| m.focused());
+                if edit.focus_pending || focus.is_none() || focus == Some(grid_id) {
+                    ui.memory_mut(|m| m.request_focus(bar_id));
+                    edit.focus_pending = false;
+                }
+                if edit.cursor_to_end {
+                    cursor_to_end(ui, bar_id, &edit.text);
+                    edit.cursor_to_end = false;
+                }
+            }
             let text = match &mut self.edit {
                 Some(edit) => &mut edit.text,
                 None => &mut self.bar_text,
@@ -547,13 +753,6 @@ impl SheetView {
                     .event_filter(EDIT_KEYS),
             );
             accessible_name(ui, &response, "Formulebalk");
-            if let Some(edit) = &mut self.edit
-                && edit.in_bar
-                && edit.focus_pending
-            {
-                response.request_focus();
-                edit.focus_pending = false;
-            }
             if response.gained_focus() && self.edit.as_ref().is_none_or(|e| !e.in_bar) {
                 match &mut self.edit {
                     Some(edit) => edit.in_bar = true,
@@ -582,6 +781,153 @@ impl SheetView {
                 self.scroll_into_view = true;
             }
             None => self.status = Some(format!("Onbekend adres: {text}")),
+        }
+    }
+
+    /// Clicking a tab: while pointing for a formula it shows the sheet and
+    /// keeps editing; otherwise any edit is committed first.
+    pub fn click_tab(&mut self, id: SheetId) {
+        if self.edit.is_some() {
+            if self.wants_reference() {
+                self.show_sheet(id);
+                self.after_sheet_switch_while_editing();
+                return;
+            }
+            if !self.commit_edit() {
+                return;
+            }
+        }
+        self.show_sheet(id);
+        self.grid_focus_pending = true;
+    }
+
+    fn finish_rename(&mut self) {
+        let Some(rename) = self.rename.take() else { return };
+        match self.doc.rename_sheet(rename.sheet, &rename.text) {
+            Ok(()) => {
+                self.status = None;
+                self.grid_focus_pending = true;
+            }
+            Err(e) => {
+                self.status = Some(e);
+                self.rename = Some(Rename { focus_pending: true, ..rename });
+            }
+        }
+    }
+
+    fn tab_bar(&mut self, ui: &mut Ui, env: &mut Env<'_>) {
+        enum Action {
+            Show(SheetId),
+            Rename,
+            Run(SheetId, Command),
+        }
+        let mut action = None;
+        let rename_id = egui::Id::unique(("rename-sheet", env.window));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let add = ui.add(egui::Button::new(" + ").frame(false)).on_hover_text("Nieuw blad (⇧F11)");
+            accessible_name(ui, &add, "Nieuw blad");
+            if add.clicked() {
+                action = Some(Action::Run(self.sheet, Command::AddSheet));
+            }
+            ui.separator();
+            egui::ScrollArea::horizontal().id_salt(("tabs", env.window)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for index in 0..self.doc.book.len() {
+                        let sheet = self.doc.book.sheet(index);
+                        let (id, name) = (sheet.id(), sheet.name().to_string());
+                        if let Some(rename) = self.rename.as_mut().filter(|r| r.sheet == id) {
+                            let width = (rename.text.chars().count() as f32 * 7.5 + 24.0).max(60.0);
+                            let has_focus = ui.memory(|m| m.has_focus(rename_id));
+                            let mut done = None;
+                            if has_focus {
+                                if take_key(ui, Key::Escape).is_some() {
+                                    done = Some(false);
+                                } else if take_key(ui, Key::Enter).is_some() {
+                                    done = Some(true);
+                                }
+                            }
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut rename.text)
+                                    .id(rename_id)
+                                    .desired_width(width)
+                                    .event_filter(EDIT_KEYS),
+                            );
+                            accessible_name(ui, &response, "Bladnaam");
+                            if rename.focus_pending {
+                                response.request_focus();
+                                let text = rename.text.clone();
+                                let mut state = egui::text_edit::TextEditState::load(ui.ctx(), rename_id)
+                                    .unwrap_or_default();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(0),
+                                    egui::text::CCursor::new(text.chars().count()),
+                                )));
+                                state.store(ui.ctx(), rename_id);
+                                rename.focus_pending = false;
+                            } else if done.is_none() && response.lost_focus() {
+                                done = Some(true);
+                            }
+                            match done {
+                                Some(true) => action = Some(Action::Rename),
+                                Some(false) => {
+                                    self.rename = None;
+                                    self.grid_focus_pending = true;
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
+                        let selected = id == self.sheet;
+                        let label = if selected {
+                            egui::RichText::new(&name).strong()
+                        } else {
+                            egui::RichText::new(&name)
+                        };
+                        let response = ui.add(egui::Button::selectable(selected, label));
+                        if response.clicked() {
+                            action = Some(Action::Show(id));
+                        }
+                        if response.double_clicked() {
+                            action = Some(Action::Run(id, Command::RenameSheet));
+                        }
+                        let only_one = self.doc.book.len() <= 1;
+                        response.context_menu(|ui| {
+                            if ui.button("Wijzig naam…").clicked() {
+                                action = Some(Action::Run(id, Command::RenameSheet));
+                                ui.close();
+                            }
+                            if ui.button("Dupliceer").clicked() {
+                                action = Some(Action::Run(id, Command::DuplicateSheet));
+                                ui.close();
+                            }
+                            if ui.add_enabled(!only_one, egui::Button::new("Verwijder")).clicked() {
+                                action = Some(Action::Run(id, Command::DeleteSheet));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Nieuw blad").clicked() {
+                                action = Some(Action::Run(id, Command::AddSheet));
+                                ui.close();
+                            }
+                        });
+                    }
+                });
+            });
+        });
+        match action {
+            Some(Action::Show(id)) => self.click_tab(id),
+            Some(Action::Rename) => self.finish_rename(),
+            Some(Action::Run(id, command)) => {
+                // Sheet commands apply to the tab they were invoked on.
+                if self.edit.is_some() && !self.commit_edit() {
+                    return;
+                }
+                self.show_sheet(id);
+                self.run(command, ui, env);
+                self.sync_sheet();
+            }
+            None => {}
         }
     }
 

@@ -1,8 +1,9 @@
 # Rustsheet
 
 Een spreadsheet in Rust, geoptimaliseerd voor macOS. Een native app met de basis van Excel:
-een rooster van 1.048.576 rijen bij 16.384 kolommen, formules met een afhankelijkheidsgraaf,
-kopiëren en plakken met Excel en Numbers, ongedaan maken, xlsx en CSV.
+werkmappen met meerdere bladen, per blad een rooster van 1.048.576 rijen bij 16.384 kolommen,
+formules met een afhankelijkheidsgraaf (ook over bladen heen), kopiëren en plakken met Excel en
+Numbers, ongedaan maken, xlsx en CSV.
 
 Het rooster wordt via wgpu op Metal getekend (Retina-scherp, vloeiend scrollen met trackpad),
 met een echte macOS-menubalk en Cmd-sneltoetsen. Waarom deze aanpak: zie
@@ -38,13 +39,22 @@ rand past de breedte aan. Tekst loopt door in lege buurcellen, getallen die niet
 Esc annuleert. Enter en Tab bevestigen en gaan omlaag of naar rechts (binnen een selectie loopt
 dat rond). Tijdens het typen van een formule voegt klikken (of slepen) op een cel de verwijzing
 in. De formulebalk toont en bewerkt de actieve cel; het naamvak links springt naar een adres
-(`B20`, `A1:C10`). De statusbalk toont som, gemiddelde en aantal van de selectie.
+(`B20`, `A1:C10`). Klik je tijdens het typen van een formule op een andere tab, dan gaat het
+typen verder in de formulebalk en voegt een klik op een cel `Blad2!A1` in. De statusbalk toont som, gemiddelde en aantal van de selectie.
+
+**Werkbladen.** Een tabbalk onderaan met een tab per blad. `+` voegt een blad toe, klikken
+wisselt, dubbelklikken hernoemt (Enter bevestigt, Esc annuleert), de rechtermuisknop geeft
+Wijzig naam, Dupliceer, Verwijder en Nieuw blad. Wisselen kan ook met ⌃Page Up/Down of ⌥⌘←/→,
+en alles staat ook in het menu Blad. Elk blad onthoudt zijn eigen selectie en scrollpositie.
+Hernoemen past elke formule aan die het blad noemt, op alle bladen. Verwijderen maakt van
+verwijzingen naar dat blad `#REF!`, zoals Excel. Alle bladbewerkingen zijn ongedaan te maken.
 
 **Formules.** Getallen, tekst, `=A1+B2`, `+ - * / ^ & %`, vergelijkingen, haakjes, bereiken
-`A1:B10`, hele kolommen `A:A` en rijen `3:5`, `$`-verwijzingen. Functies: SUM, AVERAGE, MIN,
+`A1:B10`, hele kolommen `A:A` en rijen `3:5`, `$`-verwijzingen, verwijzingen naar andere bladen
+(`Blad2!A1`, `'Mijn kosten'!B2:B9`, met aanhalingstekens bij spaties). Functies: SUM, AVERAGE, MIN,
 MAX, COUNT, COUNTA, IF, IFERROR, ROUND, CONCAT, CONCATENATE, AND, OR, NOT, ABS, LEN, UPPER, LOWER.
 Argumenten scheiden met `,` of `;`. Alleen cellen die van een wijziging afhangen worden opnieuw
-berekend. Foutwaarden `#DIV/0!`, `#REF!`, `#NAME?`, `#VALUE!`, `#NUM!` en `#CIRC!` bij een
+berekend, ook als die op een ander blad staan. Foutwaarden `#DIV/0!`, `#REF!`, `#NAME?`, `#VALUE!`, `#NUM!` en `#CIRC!` bij een
 kringverwijzing.
 
 **Klembord.** Kopiëren, knippen en plakken via het macOS-klembord. Binnen Rustsheet blijven
@@ -59,9 +69,10 @@ bewerken van een cel gelden ze voor de tekst. Delete of Backspace wist de inhoud
 **Opmaak.** Getal, valuta, percentage en datum, vet, links/midden/rechts uitlijnen. Typen van
 `12%`, `€ 5`, `1,234.50` of `22-10-2026` zet de bijpassende notatie.
 
-**Bestanden.** Openen en bewaren als `.xlsx` (lezen met calamine plus een eigen stijllezer, zodat
-vet, uitlijning, getalnotatie en kolombreedtes behouden blijven; schrijven met rust_xlsxwriter)
-en `.csv` (`,`, `;` of tab wordt herkend). Ook `.xls`, `.xlsm`, `.xlsb` en `.ods` kunnen worden
+**Bestanden.** Openen en bewaren als `.xlsx` met alle bladen (lezen met calamine plus een eigen
+stijllezer, zodat vet, uitlijning, getalnotatie en kolombreedtes behouden blijven; schrijven met
+rust_xlsxwriter) en `.csv` (`,`, `;` of tab wordt herkend; CSV kent geen bladen, dus bewaren als
+CSV schrijft het getoonde blad). Ook `.xls`, `.xlsm`, `.xlsb` en `.ods` kunnen worden
 geopend. Een venster per document, Open recent in het Archief-menu, een vraag om te bewaren bij
 sluiten, en grote bestanden laden op de achtergrond zodat het venster blijft reageren.
 
@@ -75,6 +86,8 @@ sluiten, en grote bestanden laden op de achtergrond zodat het venster blijft rea
 | ⌘B | vet |
 | ⇧⌘[, ⇧⌘\\, ⇧⌘] | links, midden, rechts uitlijnen |
 | ⌃⇧0, 1, 3, 4, 5 | standaard, getal, datum, valuta, percentage |
+| ⇧F11 | nieuw blad |
+| ⌃Page Up/Down, ⌥⌘←/→ | vorig, volgend blad |
 | pijltjes, ⇧pijltjes | verplaatsen, selectie uitbreiden |
 | ⌘pijltjes | naar de rand van het gegevensblok, zoals in Excel |
 | Enter, F2, Esc | bewerken, bevestigen, annuleren |
@@ -131,22 +144,27 @@ cargo fmt --check
 De engine-tests dekken de formuleparser (precedentie zoals Excel, rondgang naar tekst, foute
 invoer, diepte- en lengtelimieten), evaluatie en foutwaarden, kringverwijzingen, dat alleen
 geraakte cellen herberekenen (met exacte aantallen), een keten van 100.000 cellen, kopiëren met
-relatieve verwijzingen, tab-gescheiden tekst, ongedaan maken, en lezen en schrijven van xlsx en
-CSV. De interactietests sturen echte toets- en muisgebeurtenissen door de weergave: typen,
+relatieve verwijzingen, tab-gescheiden tekst, ongedaan maken, lezen en schrijven van xlsx (met
+meerdere bladen) en CSV, en verwijzingen tussen bladen: herberekening over bladen heen, kringen
+via drie bladen, ontbrekende bladen, hernoemen (formules volgen, ook met aanhalingstekens) en
+verwijderen met ongedaan maken. De interactietests sturen echte toets- en muisgebeurtenissen door de weergave: typen,
 Enter/Tab/Esc/F2, Shift- en Cmd-pijltjes, wissen, kopiëren/knippen/plakken, plakken uit een andere
-app, opmaak, formules aanwijzen met de muis, dubbelklikken en kolombreedte slepen.
+app, opmaak, formules aanwijzen met de muis (ook op een andere tab), dubbelklikken, kolombreedte
+slepen, en tabs toevoegen, wisselen, hernoemen, dupliceren en verwijderen via de echte knoppen en
+het contextmenu.
 
 Voor schermafbeeldingen kan de app zichzelf vastleggen zoals de GPU het frame tekende:
 
 ```bash
 cargo run --release -p rustsheet-core --example demo -- demo.xlsx
 dist/Rustsheet.app/Contents/MacOS/rustsheet --screenshot-and-quit shot.png --select C4:D8 demo.xlsx
+dist/Rustsheet.app/Contents/MacOS/rustsheet --screenshot-and-quit tabs.png --sheet Toelichting demo.xlsx
 ```
 
 ## Grenzen
 
-- Een document is één werkblad. Bij een werkmap met meer bladen wordt het eerste geopend;
-  verwijzingen naar andere bladen geven `#REF!`.
+- Bladen verslepen om de volgorde te wijzigen kan nog niet. Grafiekbladen en macrobladen in een
+  xlsx worden overgeslagen.
 - Functies buiten de lijst hierboven geven `#NAME?`, ook in geopende xlsx-bestanden.
 - Rijen of kolommen invoegen en verwijderen, sorteren, filteren, grafieken en voorwaardelijke
   opmaak zitten er nog niet in.

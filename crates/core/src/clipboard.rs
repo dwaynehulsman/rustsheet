@@ -206,85 +206,86 @@ pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
 mod tests {
     use super::*;
     use crate::input::parse_input;
+    use crate::workbook::Workbook;
 
     fn c(s: &str) -> CellRef {
         CellRef::parse(s).unwrap()
     }
 
-    fn set(sheet: &mut Sheet, at: &str, text: &str) {
+    fn set(book: &mut Workbook, at: &str, text: &str) {
         let p = parse_input(text).unwrap();
         let format = crate::format::CellFormat { num: p.format.unwrap_or_default(), ..Default::default() };
-        sheet.set_states(vec![(c(at), CellState { content: p.content, format })]);
+        book.set_states(0, vec![(c(at), CellState { content: p.content, format })]);
     }
 
-    fn source(sheet: &Sheet, at: &str) -> String {
-        sheet.state(c(at)).content.source()
+    fn source(book: &Workbook, at: &str) -> String {
+        book.sheet(0).state(c(at)).content.source()
     }
 
     #[test]
     fn paste_shifts_relative_references() {
-        let mut s = Sheet::new("Blad1");
+        let mut s = Workbook::new();
         set(&mut s, "A1", "1");
         set(&mut s, "A2", "2");
         set(&mut s, "B1", "=A1*$A$1+A$2+$A2");
-        let block = Block::copy(&s, Range::single(c("B1")));
-        let (_, changes) = block.paste(&s, Range::single(c("C3")), false);
-        s.set_states(changes);
+        let block = Block::copy(s.sheet(0), Range::single(c("B1")));
+        let (_, changes) = block.paste(s.sheet(0), Range::single(c("C3")), false);
+        s.set_states(0, changes);
         assert_eq!(source(&s, "C3"), "=B3*$A$1+B$2+$A4");
     }
 
     #[test]
     fn paste_off_the_grid_gives_ref_error() {
-        let mut s = Sheet::new("Blad1");
+        let mut s = Workbook::new();
         set(&mut s, "B2", "=A1+SUM(A1:A2)");
-        let block = Block::copy(&s, Range::single(c("B2")));
-        let (_, changes) = block.paste(&s, Range::single(c("A1")), false);
-        s.set_states(changes);
+        let block = Block::copy(s.sheet(0), Range::single(c("B2")));
+        let (_, changes) = block.paste(s.sheet(0), Range::single(c("A1")), false);
+        s.set_states(0, changes);
         assert_eq!(source(&s, "A1"), "=#REF!+SUM(#REF!)");
-        assert_eq!(s.display(c("A1")), "#REF!");
+        assert_eq!(s.sheet(0).display(c("A1")), "#REF!");
     }
 
     #[test]
     fn cut_keeps_references_and_tiles_fill_selection() {
-        let mut s = Sheet::new("Blad1");
+        let mut s = Workbook::new();
         set(&mut s, "A1", "5");
         set(&mut s, "B1", "=A1+1");
-        let block = Block::copy(&s, Range::single(c("B1")));
-        let (_, changes) = block.paste(&s, Range::single(c("D4")), true);
-        s.set_states(changes);
+        let block = Block::copy(s.sheet(0), Range::single(c("B1")));
+        let (_, changes) = block.paste(s.sheet(0), Range::single(c("D4")), true);
+        s.set_states(0, changes);
         assert_eq!(source(&s, "D4"), "=A1+1");
 
-        let (area, changes) = block.paste(&s, Range::new(c("F1"), c("F3")), false);
+        let (area, changes) = block.paste(s.sheet(0), Range::new(c("F1"), c("F3")), false);
         assert_eq!(area.to_string(), "F1:F3");
-        s.set_states(changes);
+        s.set_states(0, changes);
         assert_eq!(source(&s, "F3"), "=E3+1");
     }
 
     #[test]
     fn paste_clears_cells_the_block_leaves_empty() {
-        let mut s = Sheet::new("Blad1");
+        let mut s = Workbook::new();
         set(&mut s, "A1", "1");
         set(&mut s, "C1", "old");
         set(&mut s, "D1", "keep");
-        let block = Block::copy(&s, Range::new(c("A1"), c("B1")));
-        let (_, changes) = block.paste(&s, Range::single(c("B1")), false);
-        s.set_states(changes);
-        assert_eq!(s.display(c("B1")), "1");
-        assert_eq!(s.display(c("C1")), "");
-        assert_eq!(s.display(c("D1")), "keep");
+        let block = Block::copy(s.sheet(0), Range::new(c("A1"), c("B1")));
+        let (_, changes) = block.paste(s.sheet(0), Range::single(c("B1")), false);
+        s.set_states(0, changes);
+        assert_eq!(s.sheet(0).display(c("B1")), "1");
+        assert_eq!(s.sheet(0).display(c("C1")), "");
+        assert_eq!(s.sheet(0).display(c("D1")), "keep");
     }
 
     #[test]
     fn huge_selection_pastes_once() {
-        let mut s = Sheet::new("Blad1");
+        let mut s = Workbook::new();
         set(&mut s, "A1", "1");
-        let block = Block::copy(&s, Range::single(c("A1")));
+        let block = Block::copy(s.sheet(0), Range::single(c("A1")));
         let all = Range::new(c("A1"), CellRef::new(crate::MAX_ROWS - 1, crate::MAX_COLS - 1));
-        let (area, changes) = block.paste(&s, all, false);
+        let (area, changes) = block.paste(s.sheet(0), all, false);
         assert_eq!(area, Range::single(c("A1")));
         assert_eq!(changes.len(), 1);
         let column = Range::new(c("B1"), CellRef::new(crate::MAX_ROWS - 1, 1));
-        let (_, changes) = block.paste(&s, column, false);
+        let (_, changes) = block.paste(s.sheet(0), column, false);
         assert_eq!(changes.len(), crate::MAX_ROWS as usize);
     }
 
@@ -300,11 +301,11 @@ mod tests {
             ]
         );
 
-        let mut s = Sheet::new("Blad1");
+        let mut s = Workbook::new();
         set(&mut s, "A1", "x\ty");
         set(&mut s, "B1", "=2*3");
         set(&mut s, "A2", "say \"hi\"");
-        let tsv = to_tsv(&s, Range::new(c("A1"), c("C9")));
+        let tsv = to_tsv(s.sheet(0), Range::new(c("A1"), c("C9")));
         assert_eq!(tsv, "\"x\ty\"\t6\n\"say \"\"hi\"\"\"\t\n");
         assert_eq!(parse_tsv(&tsv), vec![vec!["x\ty", "6"], vec!["say \"hi\"", ""]]);
     }
@@ -312,13 +313,13 @@ mod tests {
     #[test]
     fn tsv_from_excel_becomes_values() {
         let block = Block::from_tsv("Naam\tBedrag\nKoffie\t€ 1,250.50\nThee\t12%\n");
-        let mut s = Sheet::new("Blad1");
-        let (area, changes) = block.paste(&s, Range::single(c("B2")), false);
+        let mut s = Workbook::new();
+        let (area, changes) = block.paste(s.sheet(0), Range::single(c("B2")), false);
         assert_eq!(area.to_string(), "B2:C4");
-        s.set_states(changes);
-        assert_eq!(s.value(c("C3")), &crate::value::Value::Number(1250.5));
-        assert_eq!(s.display(c("C3")), "€ 1,250.50");
-        assert_eq!(s.display(c("C4")), "12.00%");
-        assert_eq!(s.display(c("B2")), "Naam");
+        s.set_states(0, changes);
+        assert_eq!(s.sheet(0).value(c("C3")), &crate::value::Value::Number(1250.5));
+        assert_eq!(s.sheet(0).display(c("C3")), "€ 1,250.50");
+        assert_eq!(s.sheet(0).display(c("C4")), "12.00%");
+        assert_eq!(s.sheet(0).display(c("B2")), "Naam");
     }
 }

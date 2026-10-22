@@ -8,11 +8,12 @@ use crate::format::CellFormat;
 use crate::input::{Content, Parsed, parse_input, parse_literal};
 use crate::sheet::{CellState, Sheet};
 use crate::value::Value;
+use crate::workbook::Workbook;
 
 /// Reads a CSV file. The delimiter (`,`, `;` or tab) is detected from the
 /// first line; Dutch Excel writes `;`. Text that is not valid UTF-8 is read
 /// as Windows-1252.
-pub fn read_csv(path: &Path, sheet_name: &str) -> Result<Sheet, IoError> {
+pub fn read_csv(path: &Path, sheet_name: &str) -> Result<Workbook, IoError> {
     let bytes = std::fs::read(path)?;
     let text = match String::from_utf8(bytes) {
         Ok(s) => s,
@@ -54,7 +55,8 @@ fn detect_delimiter(text: &str) -> u8 {
         .map_or(b',', |(d, _)| d)
 }
 
-pub fn read_csv_str(text: &str, sheet_name: &str) -> Result<Sheet, IoError> {
+/// Reads CSV text into a one-sheet workbook.
+pub fn read_csv_str(text: &str, sheet_name: &str) -> Result<Workbook, IoError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut reader = ::csv::ReaderBuilder::new()
         .has_headers(false)
@@ -84,8 +86,7 @@ pub fn read_csv_str(text: &str, sheet_name: &str) -> Result<Sheet, IoError> {
             sheet.put(CellRef::new(r as u32, c as u32), CellState { content: parsed.content, format });
         }
     }
-    sheet.recalc_all();
-    Ok(sheet)
+    Ok(Workbook::from_sheets(vec![sheet]))
 }
 
 /// Characters that make Excel, Numbers and LibreOffice treat a CSV field as
@@ -136,9 +137,11 @@ mod tests {
 
     #[test]
     fn reads_semicolons_quotes_and_formulas() {
-        let sheet =
+        let book =
             read_csv_str("\u{feff}naam;bedrag\r\n\"Jansen; B.\";12.5\r\ntotaal;=SUM(B2:B2)*2\r\n", "test")
                 .unwrap();
+        let sheet = book.sheet(0);
+        assert_eq!(sheet.name(), "test");
         assert_eq!(sheet.display(CellRef::new(1, 0)), "Jansen; B.");
         assert_eq!(sheet.value(CellRef::new(1, 1)), &Value::Number(12.5));
         assert_eq!(sheet.value(CellRef::new(2, 1)), &Value::Number(25.0));
@@ -146,21 +149,23 @@ mod tests {
 
     #[test]
     fn round_trips_through_csv() {
-        let mut sheet = Sheet::new("Blad1");
-        let set = |sheet: &mut Sheet, at: &str, text: &str| {
+        let mut book = Workbook::new();
+        let mut set = |at: &str, text: &str| {
             let p = parse_input(text).unwrap();
             let format = CellFormat { num: p.format.unwrap_or_default(), ..CellFormat::default() };
-            sheet.set_states(vec![(CellRef::parse(at).unwrap(), CellState { content: p.content, format })]);
+            book.set_states(0, vec![(CellRef::parse(at).unwrap(), CellState { content: p.content, format })]);
         };
-        set(&mut sheet, "A1", "Product");
-        set(&mut sheet, "B1", "Prijs, incl.");
-        set(&mut sheet, "A2", "Thee \"groen\"");
-        set(&mut sheet, "B2", "€ 3.50");
-        set(&mut sheet, "C2", "=B2*2");
-        set(&mut sheet, "B3", "22-10-2026");
-        let text = write_csv_string(&sheet);
+        set("A1", "Product");
+        set("B1", "Prijs, incl.");
+        set("A2", "Thee \"groen\"");
+        set("B2", "€ 3.50");
+        set("C2", "=B2*2");
+        set("B3", "22-10-2026");
+        let sheet = book.sheet(0);
+        let text = write_csv_string(sheet);
         assert_eq!(text, "Product,\"Prijs, incl.\",\r\n\"Thee \"\"groen\"\"\",€ 3.50,7\r\n,22-10-2026,\r\n");
         let back = read_csv_str(&text, "Blad1").unwrap();
+        let back = back.sheet(0);
         for at in ["A1", "B1", "A2", "B2", "C2", "B3"] {
             let at = CellRef::parse(at).unwrap();
             assert_eq!(back.display(at), sheet.display(at), "{at}");
@@ -170,7 +175,7 @@ mod tests {
 
     #[test]
     fn escapes_text_that_would_run_as_a_formula() {
-        let mut sheet = Sheet::new("Blad1");
+        let mut book = Workbook::new();
         let inputs = [
             "'=HYPERLINK(\"http://x\")",
             "'+1",
@@ -186,17 +191,19 @@ mod tests {
         ];
         for (i, text) in inputs.iter().enumerate() {
             let p = parse_input(text).unwrap();
-            sheet.set_states(vec![(
-                CellRef::new(i as u32, 0),
-                CellState { content: p.content, ..Default::default() },
-            )]);
+            book.set_states(
+                0,
+                vec![(CellRef::new(i as u32, 0), CellState { content: p.content, ..Default::default() })],
+            );
         }
-        let text = write_csv_string(&sheet);
+        let sheet = book.sheet(0);
+        let text = write_csv_string(sheet);
         assert_eq!(
             text,
             "\"'=HYPERLINK(\"\"http://x\"\")\"\r\n'+1\r\n'-tekst\r\n'@SUM(1)\r\n''quote\r\n2\r\n-5\r\n'  =1+1\r\n'\tx\r\n\"'\n=1\"\r\n'＝1+1\r\n"
         );
         let back = read_csv_str(&text, "Blad1").unwrap();
+        let back = back.sheet(0);
         for i in 0..inputs.len() as u32 {
             let at = CellRef::new(i, 0);
             assert_eq!(back.value(at), sheet.value(at), "row {i}");

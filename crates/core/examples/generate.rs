@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use rustsheet_core::{Align, CellFormat, CellRef, CellState, NumFmt, Sheet, io, parse_input};
+use rustsheet_core::{Align, CellFormat, CellRef, CellState, NumFmt, Sheet, Workbook, io, parse_input};
 
 /// CPU time used by this thread. On a busy machine wall-clock time mostly
 /// measures waiting for a core, so the benchmark reports both.
@@ -27,7 +27,7 @@ fn main() {
     let rows: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let out = args.next().unwrap_or_else(|| format!("bench-{rows}.xlsx"));
 
-    let (mut sheet, build_wall, build_cpu) = timed(|| {
+    let (sheet, build_wall, build_cpu) = timed(|| {
         let mut sheet = Sheet::new("Bestellingen");
         let bold = CellFormat { bold: true, align: Align::Center, ..CellFormat::default() };
         let currency = CellFormat { num: NumFmt::Currency, ..CellFormat::default() };
@@ -60,29 +60,30 @@ fn main() {
         sheet
     });
 
-    let ((), recalc_wall, recalc_cpu) = timed(|| sheet.recalc_all());
+    // Building the workbook registers every formula and calculates them all.
+    let (book, recalc_wall, recalc_cpu) = timed(|| Workbook::from_sheets(vec![sheet]));
     let path = std::path::Path::new(&out);
-    let ((), save_wall, save_cpu) = timed(|| io::save(&sheet, path).expect("save"));
+    let ((), save_wall, save_cpu) = timed(|| io::save(&book, path, 0).expect("save"));
     let (mut loaded, open_wall, open_cpu) = timed(|| io::open(path).expect("open"));
 
     // One edit at the top of the running-total chain touches every row below.
     let content = parse_input("999").unwrap().content;
     let (_, edit_wall, edit_cpu) = timed(|| {
-        loaded.set_states(vec![(CellRef::new(1, 2), CellState { content, ..CellState::default() })])
+        loaded.set_states(0, vec![(CellRef::new(1, 2), CellState { content, ..CellState::default() })])
     });
     let touched = loaded.last_recalc_count();
 
     // An edit at the bottom touches only its own row.
     let content = parse_input("5").unwrap().content;
     let (_, last_wall, last_cpu) = timed(|| {
-        loaded.set_states(vec![(CellRef::new(rows, 2), CellState { content, ..CellState::default() })])
+        loaded.set_states(0, vec![(CellRef::new(rows, 2), CellState { content, ..CellState::default() })])
     });
 
     println!("rows: {rows}, cells: {}, formulas: {}", loaded.cell_count(), loaded.formula_count());
     println!("{:<44} {:>10} {:>10}", "step", "wall ms", "cpu ms");
     for (name, wall, cpu) in [
         ("build sheet".to_string(), build_wall, build_cpu),
-        ("full recalc".to_string(), recalc_wall, recalc_cpu),
+        ("register + full recalc".to_string(), recalc_wall, recalc_cpu),
         ("save xlsx".to_string(), save_wall, save_cpu),
         ("open xlsx (read + full recalc)".to_string(), open_wall, open_cpu),
         (format!("edit C2 (recalcs {touched} formulas)"), edit_wall, edit_cpu),

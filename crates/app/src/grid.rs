@@ -465,7 +465,8 @@ impl SheetView {
         let first_visible_row = g.rows.first().map_or(0, |r| r.0);
         let first_visible_col = g.cols.first().map_or(0, |c| c.0);
         // Clicking anywhere but a cell reference target ends an edit.
-        let pointing = matches!(zone, Zone::Cell(at) if self.wants_reference() && self.edit.as_ref().is_some_and(|e| e.cell != at));
+        let pointing = matches!(zone, Zone::Cell(at) if self.wants_reference()
+            && self.edit.as_ref().is_some_and(|e| e.cell != at || e.sheet != self.sheet));
         if !pointing
             && !matches!(zone, Zone::VBar | Zone::HBar | Zone::ColBorder(_))
             && self.edit.is_some()
@@ -586,7 +587,7 @@ impl SheetView {
             Drag::Rows => self.sel.corner = CellRef::new(at.row, MAX_COLS - 1),
             Drag::Resize { col, start_width, grab_x, .. } => {
                 let width = (start_width + pos.x - grab_x).max(MIN_COL_WIDTH);
-                self.doc.sheet.set_col_width(col, Some(width));
+                self.preview_column_width(col, Some(width));
             }
             Drag::ScrollV { grab } => {
                 let (thumb, range) = self.thumb(g, true);
@@ -614,7 +615,7 @@ impl SheetView {
         }
         let original = self.sheet().custom_col_width(col);
         let width = if widest == 0.0 { None } else { Some((widest + 2.0 * PAD + 4.0).max(MIN_COL_WIDTH)) };
-        self.doc.sheet.set_col_width(col, width);
+        self.preview_column_width(col, width);
         self.set_column_width(col, original, width.filter(|w| (*w - DEFAULT_COL_WIDTH).abs() > 0.5));
     }
 
@@ -650,7 +651,8 @@ impl SheetView {
         }
 
         // Cell text.
-        let editing_cell = self.edit.as_ref().filter(|e| !e.in_bar).map(|e| e.cell);
+        let here = |e: &&crate::view::Edit| e.sheet == self.sheet;
+        let editing_cell = self.edit.as_ref().filter(here).filter(|e| !e.in_bar).map(|e| e.cell);
         let last_col = g.cols.last().map_or(0, |c| c.0);
         for &(row, y) in &g.rows {
             for (ci, &(col, x, w)) in g.cols.iter().enumerate() {
@@ -658,8 +660,12 @@ impl SheetView {
                 if Some(at) == editing_cell {
                     continue;
                 }
-                let bar_text =
-                    self.edit.as_ref().filter(|e| e.in_bar && e.cell == at).map(|e| e.text.clone());
+                let bar_text = self
+                    .edit
+                    .as_ref()
+                    .filter(here)
+                    .filter(|e| e.in_bar && e.cell == at)
+                    .map(|e| e.text.clone());
                 let Some(cell) = sheet.cell(at) else {
                     if let Some(text) = bar_text {
                         let galley = painter.layout_no_wrap(text, FontId::proportional(CELL_FONT), p.text);
@@ -734,7 +740,7 @@ impl SheetView {
         }
 
         // Marching border around a pending cut or copy source.
-        if let Some(cut) = env.clip.cut().filter(|c| c.window == env.window) {
+        if let Some(cut) = env.clip.cut().filter(|c| c.window == env.window && c.sheet == self.sheet) {
             let r = self.range_rect(g, cut.range).shrink(1.0);
             let path = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
             cells_painter.extend(Shape::dashed_line(&path, Stroke::new(1.5, p.accent), 4.0, 3.0));
@@ -799,7 +805,8 @@ impl SheetView {
 
     fn editor(&mut self, ui: &mut Ui, g: &Geometry, p: &Palette, editor_id: egui::Id, _bar_id: egui::Id) {
         let Some(edit) = &self.edit else { return };
-        if edit.in_bar {
+        // While pointing at another sheet the formula bar does the editing.
+        if edit.in_bar || edit.sheet != self.sheet {
             return;
         }
         take_edit_keys(ui, self, editor_id);

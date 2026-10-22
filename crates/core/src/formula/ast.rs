@@ -3,6 +3,7 @@
 use std::fmt;
 
 use crate::addr::{CellRef, MAX_COLS, MAX_ROWS, Range, col_name};
+use crate::sheet::SheetId;
 use crate::value::ErrorKind;
 
 /// One axis of a reference: an index plus the `$` marker.
@@ -166,11 +167,17 @@ pub enum Expr {
     Name(String),
 }
 
-/// A cell or range a formula reads, used by the dependency graph.
+/// A cell or range a formula reads, on a given sheet; used by the
+/// dependency graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Precedent {
-    Cell(CellRef),
-    Range(Range),
+    Cell(SheetId, CellRef),
+    Range(SheetId, Range),
+}
+
+/// Sheet names compare case-insensitively, like in Excel.
+pub fn same_sheet_name(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || a.to_lowercase() == b.to_lowercase()
 }
 
 impl Expr {
@@ -197,38 +204,102 @@ impl Expr {
         }
     }
 
-    /// Collects every cell and range on `own_sheet` (or unqualified) that
-    /// this expression reads.
-    pub fn precedents(&self, own_sheet: &str, out: &mut Vec<Precedent>) {
-        let local =
-            |sheet: &Option<String>| sheet.as_deref().is_none_or(|s| s.eq_ignore_ascii_case(own_sheet));
+    /// Collects every cell and range this expression reads. Unqualified
+    /// references are on `own`; `resolve` maps a sheet name to its id, and
+    /// references to sheets that do not exist are skipped (they evaluate to
+    /// `#REF!`).
+    pub fn precedents(
+        &self,
+        own: SheetId,
+        resolve: &dyn Fn(&str) -> Option<SheetId>,
+        out: &mut Vec<Precedent>,
+    ) {
+        let target = |sheet: &Option<String>| match sheet {
+            None => Some(own),
+            Some(name) => resolve(name),
+        };
         match self {
-            Expr::Ref { sheet, addr } if local(sheet) => out.push(Precedent::Cell(addr.cell())),
-            Expr::Range(r) if local(&r.sheet) => {
-                let range = r.resolve();
-                out.push(if range.start == range.end {
-                    Precedent::Cell(range.start)
-                } else {
-                    Precedent::Range(range)
-                });
+            Expr::Ref { sheet, addr } => {
+                if let Some(id) = target(sheet) {
+                    out.push(Precedent::Cell(id, addr.cell()));
+                }
             }
-            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.precedents(own_sheet, out),
+            Expr::Range(r) => {
+                if let Some(id) = target(&r.sheet) {
+                    let range = r.resolve();
+                    out.push(if range.start == range.end {
+                        Precedent::Cell(id, range.start)
+                    } else {
+                        Precedent::Range(id, range)
+                    });
+                }
+            }
+            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.precedents(own, resolve, out),
             Expr::Binary(first, rest) => {
-                first.precedents(own_sheet, out);
-                rest.iter().for_each(|(_, e)| e.precedents(own_sheet, out));
+                first.precedents(own, resolve, out);
+                rest.iter().for_each(|(_, e)| e.precedents(own, resolve, out));
             }
-            Expr::Call(_, args) => args.iter().for_each(|a| a.precedents(own_sheet, out)),
+            Expr::Call(_, args) => args.iter().for_each(|a| a.precedents(own, resolve, out)),
             _ => {}
+        }
+    }
+
+    /// Whether any reference names sheet `name` explicitly.
+    pub fn mentions_sheet(&self, name: &str) -> bool {
+        let named = |sheet: &Option<String>| sheet.as_deref().is_some_and(|s| same_sheet_name(s, name));
+        match self {
+            Expr::Ref { sheet, .. } => named(sheet),
+            Expr::Range(r) => named(&r.sheet),
+            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.mentions_sheet(name),
+            Expr::Binary(first, rest) => {
+                first.mentions_sheet(name) || rest.iter().any(|(_, e)| e.mentions_sheet(name))
+            }
+            Expr::Call(_, args) => args.iter().any(|a| a.mentions_sheet(name)),
+            _ => false,
+        }
+    }
+
+    /// Copy with every reference to sheet `old` pointing at `new` instead,
+    /// or, when `new` is `None` (the sheet was deleted), replaced by `#REF!`.
+    pub fn with_sheet_renamed(&self, old: &str, new: Option<&str>) -> Expr {
+        let named = |sheet: &Option<String>| sheet.as_deref().is_some_and(|s| same_sheet_name(s, old));
+        match self {
+            Expr::Ref { sheet, addr } if named(sheet) => match new {
+                Some(n) => Expr::Ref { sheet: Some(n.to_string()), addr: *addr },
+                None => Expr::Error(ErrorKind::Ref),
+            },
+            Expr::Range(r) if named(&r.sheet) => match new {
+                Some(n) => Expr::Range(RangeAddr { sheet: Some(n.to_string()), kind: r.kind }),
+                None => Expr::Error(ErrorKind::Ref),
+            },
+            Expr::Unary(op, e) => Expr::Unary(*op, Box::new(e.with_sheet_renamed(old, new))),
+            Expr::Percent(e) => Expr::Percent(Box::new(e.with_sheet_renamed(old, new))),
+            Expr::Paren(e) => Expr::Paren(Box::new(e.with_sheet_renamed(old, new))),
+            Expr::Binary(first, rest) => Expr::Binary(
+                Box::new(first.with_sheet_renamed(old, new)),
+                rest.iter().map(|(op, e)| (*op, e.with_sheet_renamed(old, new))).collect(),
+            ),
+            Expr::Call(name, args) => {
+                Expr::Call(name.clone(), args.iter().map(|a| a.with_sheet_renamed(old, new)).collect())
+            }
+            other => other.clone(),
         }
     }
 }
 
-fn write_sheet(f: &mut fmt::Formatter<'_>, sheet: &Option<String>) -> fmt::Result {
-    let Some(name) = sheet else { return Ok(()) };
+/// `Blad2!` or `'Mijn blad'!`: how a sheet name is written before a reference.
+pub fn sheet_prefix(name: &str) -> String {
     let plain = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
         && !looks_like_cell(name);
-    if plain { write!(f, "{name}!") } else { write!(f, "'{}'!", name.replace('\'', "''")) }
+    if plain { format!("{name}!") } else { format!("'{}'!", name.replace('\'', "''")) }
+}
+
+fn write_sheet(f: &mut fmt::Formatter<'_>, sheet: &Option<String>) -> fmt::Result {
+    match sheet {
+        Some(name) => f.write_str(&sheet_prefix(name)),
+        None => Ok(()),
+    }
 }
 
 fn looks_like_cell(s: &str) -> bool {

@@ -7,7 +7,7 @@ use std::time::Instant;
 use egui::{ViewportBuilder, ViewportCommand, ViewportId};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use rustsheet_core::io::{self, FileKind, OPEN_EXTENSIONS};
-use rustsheet_core::{Document, Sheet};
+use rustsheet_core::{Document, Workbook};
 
 use crate::bench::{Bench, Shot};
 use crate::clip::ClipState;
@@ -19,7 +19,7 @@ use crate::view::{Env, Request, SheetView};
 struct Loading {
     path: PathBuf,
     started: Instant,
-    result: std::sync::mpsc::Receiver<Result<Sheet, io::IoError>>,
+    result: std::sync::mpsc::Receiver<Result<Workbook, io::IoError>>,
 }
 
 struct DocWindow {
@@ -44,6 +44,8 @@ pub struct RustsheetApp {
     loading: Vec<Loading>,
     /// `--select`, applied once the files given at launch are open.
     pending_select: Option<String>,
+    /// `--sheet`, the sheet to show once the files are open.
+    pending_sheet: Option<String>,
     /// Window showing the "opening…" message.
     loading_status: Option<u64>,
 }
@@ -68,6 +70,7 @@ impl RustsheetApp {
         bench: Option<Bench>,
         shot: Option<Shot>,
         select: Option<String>,
+        sheet: Option<String>,
     ) -> Self {
         crate::fonts::install(&cc.egui_ctx);
         cc.egui_ctx.options_mut(|o| o.input_options.line_scroll_speed = 44.0);
@@ -90,6 +93,7 @@ impl RustsheetApp {
             shot,
             loading: Vec::new(),
             pending_select: None,
+            pending_sheet: None,
             loading_status: None,
         };
         app.new_window(None);
@@ -97,6 +101,7 @@ impl RustsheetApp {
             app.open_path(&path, &cc.egui_ctx);
         }
         app.pending_select = select;
+        app.pending_sheet = sheet;
         app
     }
 
@@ -108,7 +113,7 @@ impl RustsheetApp {
             None => {
                 let n = self.next_untitled;
                 self.next_untitled += 1;
-                SheetView::new(Document::new(Sheet::new("Blad1")), None, n)
+                SheetView::new(Document::new(Workbook::new()), None, n)
             }
         };
         self.windows.push(DocWindow { id, view, title_sent: String::new() });
@@ -167,11 +172,11 @@ impl RustsheetApp {
             };
             let Loading { path, started, .. } = self.loading.remove(i);
             match result {
-                Ok(sheet) => {
+                Ok(book) => {
                     if let Some(bench) = &mut self.bench {
-                        bench.loaded(&path, started.elapsed(), &sheet);
+                        bench.loaded(&path, started.elapsed(), &book);
                     }
-                    let doc = Document::new(sheet);
+                    let doc = Document::new(book);
                     let active = self.active_index();
                     if self.windows.get(active).is_some_and(|w| w.view.is_pristine()) {
                         self.windows[active].view = SheetView::new(doc, Some(path.clone()), 0);
@@ -228,7 +233,8 @@ impl RustsheetApp {
         if window.view.edit.is_some() && !window.view.commit_edit() {
             return false;
         }
-        match io::save(&window.view.doc.sheet, &path) {
+        let active = window.view.doc.book.index_of(window.view.sheet).unwrap_or(0);
+        match io::save(&window.view.doc.book, &path, active) {
             Ok(()) => {
                 window.view.doc.mark_saved();
                 window.view.path = Some(path.canonicalize().unwrap_or(path.clone()));
@@ -396,6 +402,13 @@ impl eframe::App for RustsheetApp {
                 if let Some(i) = self.loading_status.take().and_then(|id| self.index_of(id)) {
                     self.windows[i].view.status = None;
                 }
+                if let Some(name) = self.pending_sheet.take() {
+                    let index = self.active_index();
+                    let view = &mut self.windows[index].view;
+                    if let Some(id) = view.doc.book.find(&name) {
+                        view.show_sheet(id);
+                    }
+                }
                 if let Some(range) = self.pending_select.take() {
                     let index = self.active_index();
                     self.windows[index].view.jump_to(&range);
@@ -435,7 +448,7 @@ impl eframe::App for RustsheetApp {
             match request {
                 Request::ClearCut(cut) => {
                     if let Some(i) = self.index_of(cut.window) {
-                        self.windows[i].view.clear_cut_source(cut.range);
+                        self.windows[i].view.clear_cut_source(cut.sheet, cut.range);
                     }
                 }
             }

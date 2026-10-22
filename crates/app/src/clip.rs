@@ -1,13 +1,14 @@
 //! Clipboard state shared by all windows: the macOS pasteboard plus the
 //! last block we copied, so pastes within Rustsheet keep formulas.
 
-use rustsheet_core::Range;
 use rustsheet_core::clipboard::Block;
+use rustsheet_core::{Range, SheetId};
 
 /// Where a pending cut came from; cleared once the cut is pasted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CutSource {
     pub window: u64,
+    pub sheet: SheetId,
     pub range: Range,
 }
 

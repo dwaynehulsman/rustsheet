@@ -60,28 +60,39 @@ fn builtin_num_fmt(id: u32) -> NumFmt {
     }
 }
 
-/// The path inside the archive of the worksheet with index `index` in workbook order.
-fn sheet_path<R: Read + Seek>(zip: &mut ZipArchive<R>, index: usize) -> Option<String> {
-    let mut rel_ids = Vec::new();
-    each_element(read_part(zip, "xl/workbook.xml")?, |e, _| {
-        if e.local_name().as_ref() == "sheet"
-            && let Some(id) = attr(e, "id")
-        {
-            rel_ids.push(id);
-        }
-    });
-    let wanted = rel_ids.get(index)?.clone();
-    let mut target = None;
-    each_element(read_part(zip, "xl/_rels/workbook.xml.rels")?, |e, _| {
-        if e.local_name().as_ref() == "Relationship" && attr(e, "Id").as_deref() == Some(&wanted) {
-            target = attr(e, "Target");
-        }
-    });
-    let target = target?;
-    Some(match target.strip_prefix('/') {
-        Some(abs) => abs.to_string(),
-        None => format!("xl/{target}"),
-    })
+/// Archive path of every sheet, by sheet name.
+fn sheet_paths<R: Read + Seek>(zip: &mut ZipArchive<R>) -> HashMap<String, String> {
+    let mut sheets = Vec::new();
+    if let Some(part) = read_part(zip, "xl/workbook.xml") {
+        each_element(part, |e, _| {
+            if e.local_name().as_ref() == "sheet"
+                && let (Some(name), Some(id)) = (attr(e, "name"), attr(e, "id"))
+            {
+                sheets.push((name, id));
+            }
+        });
+    }
+    let mut targets = HashMap::new();
+    if let Some(part) = read_part(zip, "xl/_rels/workbook.xml.rels") {
+        each_element(part, |e, _| {
+            if e.local_name().as_ref() == "Relationship"
+                && let (Some(id), Some(target)) = (attr(e, "Id"), attr(e, "Target"))
+            {
+                targets.insert(id, target);
+            }
+        });
+    }
+    sheets
+        .into_iter()
+        .filter_map(|(name, id)| {
+            let target = targets.get(&id)?;
+            let path = match target.strip_prefix('/') {
+                Some(abs) => abs.to_string(),
+                None => format!("xl/{target}"),
+            };
+            Some((name, path))
+        })
+        .collect()
 }
 
 /// Cell formats indexed by the `s` attribute of cells.
@@ -158,37 +169,45 @@ fn cell_xfs<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CellFormat> {
     xfs
 }
 
-/// Reads cell styles and column widths of the worksheet at `index`.
-/// Returns empty styles for files that are not xlsx or lack these parts.
-pub fn read_sheet_styles<R: Read + Seek>(reader: R, index: usize) -> SheetStyles {
-    let Ok(mut zip) = ZipArchive::new(reader) else { return SheetStyles::default() };
+/// Reads cell styles and column widths of the named worksheets, in the
+/// same order. Sheets (or files) without these parts get empty styles.
+pub fn read_styles<R: Read + Seek>(reader: R, names: &[String]) -> Vec<SheetStyles> {
+    let Ok(mut zip) = ZipArchive::new(reader) else {
+        return names.iter().map(|_| SheetStyles::default()).collect();
+    };
     let xfs = cell_xfs(&mut zip);
-    let Some(path) = sheet_path(&mut zip, index) else { return SheetStyles::default() };
-    let Some(part) = read_part(&mut zip, &path) else { return SheetStyles::default() };
-    let mut styles = SheetStyles::default();
-    each_element(part, |e, _| match e.local_name().as_ref() {
-        "c" => {
-            let Some(style) = attr(e, "s").and_then(|s| s.parse::<usize>().ok()) else { return };
-            let Some(format) = xfs.get(style).copied().filter(|f| !f.is_default()) else { return };
-            if let Some(at) = attr(e, "r").and_then(|r| CellRef::parse(&r)) {
-                styles.cells.push((at, format));
-            }
-        }
-        "col" => {
-            let custom = attr(e, "customWidth").is_some_and(|v| v == "1" || v == "true");
-            let (Some(min), Some(max), Some(width)) = (
-                attr(e, "min").and_then(|v| v.parse::<u32>().ok()),
-                attr(e, "max").and_then(|v| v.parse::<u32>().ok()),
-                attr(e, "width").and_then(|v| v.parse::<f64>().ok()),
-            ) else {
-                return;
-            };
-            // Ranges spanning the whole sheet are default widths in disguise.
-            if custom && min >= 1 && max >= min && max - min < 1024 {
-                styles.col_widths.extend((min - 1..max).map(|c| (c, width)));
-            }
-        }
-        _ => {}
-    });
-    styles
+    let paths = sheet_paths(&mut zip);
+    names
+        .iter()
+        .map(|name| {
+            let Some(path) = paths.get(name) else { return SheetStyles::default() };
+            let Some(part) = read_part(&mut zip, path) else { return SheetStyles::default() };
+            let mut styles = SheetStyles::default();
+            each_element(part, |e, _| match e.local_name().as_ref() {
+                "c" => {
+                    let Some(style) = attr(e, "s").and_then(|s| s.parse::<usize>().ok()) else { return };
+                    let Some(format) = xfs.get(style).copied().filter(|f| !f.is_default()) else { return };
+                    if let Some(at) = attr(e, "r").and_then(|r| CellRef::parse(&r)) {
+                        styles.cells.push((at, format));
+                    }
+                }
+                "col" => {
+                    let custom = attr(e, "customWidth").is_some_and(|v| v == "1" || v == "true");
+                    let (Some(min), Some(max), Some(width)) = (
+                        attr(e, "min").and_then(|v| v.parse::<u32>().ok()),
+                        attr(e, "max").and_then(|v| v.parse::<u32>().ok()),
+                        attr(e, "width").and_then(|v| v.parse::<f64>().ok()),
+                    ) else {
+                        return;
+                    };
+                    // Ranges spanning the whole sheet are default widths in disguise.
+                    if custom && min >= 1 && max >= min && max - min < 1024 {
+                        styles.col_widths.extend((min - 1..max).map(|c| (c, width)));
+                    }
+                }
+                _ => {}
+            });
+            styles
+        })
+        .collect()
 }

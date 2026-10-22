@@ -29,6 +29,12 @@ pub enum Command {
     Bold,
     Align(Align),
     NumFmt(NumFmt),
+    AddSheet,
+    DuplicateSheet,
+    RenameSheet,
+    DeleteSheet,
+    NextSheet,
+    PrevSheet,
 }
 
 impl Command {
@@ -52,6 +58,12 @@ impl Command {
             Command::Bold => "bold".into(),
             Command::Align(a) => format!("align:{a:?}"),
             Command::NumFmt(f) => format!("numfmt:{f:?}"),
+            Command::AddSheet => "add-sheet".into(),
+            Command::DuplicateSheet => "duplicate-sheet".into(),
+            Command::RenameSheet => "rename-sheet".into(),
+            Command::DeleteSheet => "delete-sheet".into(),
+            Command::NextSheet => "next-sheet".into(),
+            Command::PrevSheet => "prev-sheet".into(),
         }
     }
 
@@ -79,6 +91,12 @@ impl Command {
             Command::Align(Align::Left),
             Command::Align(Align::Center),
             Command::Align(Align::Right),
+            Command::AddSheet,
+            Command::DuplicateSheet,
+            Command::RenameSheet,
+            Command::DeleteSheet,
+            Command::NextSheet,
+            Command::PrevSheet,
         ];
         all.into_iter().chain(NumFmt::ALL.into_iter().map(Command::NumFmt)).find(|c| c.id() == id)
     }
@@ -198,6 +216,21 @@ impl AppMenu {
         )
         .expect("format menu");
 
+        let sheet = Submenu::with_items(
+            "Blad",
+            true,
+            &[
+                &item("Nieuw blad", Command::AddSheet, Some("Shift+F11")),
+                &item("Dupliceer blad", Command::DuplicateSheet, None),
+                &item("Wijzig naam…", Command::RenameSheet, None),
+                &item("Verwijder blad", Command::DeleteSheet, None),
+                &PredefinedMenuItem::separator(),
+                &item("Volgend blad", Command::NextSheet, Some("Alt+CmdOrCtrl+ArrowRight")),
+                &item("Vorig blad", Command::PrevSheet, Some("Alt+CmdOrCtrl+ArrowLeft")),
+            ],
+        )
+        .expect("sheet menu");
+
         let window = Submenu::with_items(
             "Venster",
             true,
@@ -210,7 +243,7 @@ impl AppMenu {
         )
         .expect("window menu");
 
-        menu.append_items(&[&app, &file, &edit, &format, &window]).expect("menu bar");
+        menu.append_items(&[&app, &file, &edit, &format, &sheet, &window]).expect("menu bar");
         menu.init_for_nsapp();
         window.set_as_windows_menu_for_nsapp();
 
