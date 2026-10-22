@@ -15,6 +15,13 @@ use crate::menu::{AppMenu, Command};
 use crate::recent::RecentFiles;
 use crate::view::{Env, Request, SheetView};
 
+/// A file being read on a background thread.
+struct Loading {
+    path: PathBuf,
+    started: Instant,
+    result: std::sync::mpsc::Receiver<Result<Sheet, io::IoError>>,
+}
+
 struct DocWindow {
     id: u64,
     view: SheetView,
@@ -34,6 +41,11 @@ pub struct RustsheetApp {
     undo_state: (bool, bool),
     bench: Option<Bench>,
     shot: Option<Shot>,
+    loading: Vec<Loading>,
+    /// `--select`, applied once the files given at launch are open.
+    pending_select: Option<String>,
+    /// Window showing the "opening…" message.
+    loading_status: Option<u64>,
 }
 
 fn viewport_of(id: u64, index: usize) -> ViewportId {
@@ -76,14 +88,15 @@ impl RustsheetApp {
             undo_state: (true, true),
             bench,
             shot,
+            loading: Vec::new(),
+            pending_select: None,
+            loading_status: None,
         };
         app.new_window(None);
         for path in files {
             app.open_path(&path, &cc.egui_ctx);
         }
-        if let Some(range) = select {
-            app.windows[0].view.jump_to(&range);
-        }
+        app.pending_select = select;
         app
     }
 
@@ -115,6 +128,8 @@ impl RustsheetApp {
         ctx.send_viewport_cmd_to(viewport_of(self.windows[index].id, index), ViewportCommand::Focus);
     }
 
+    /// Starts loading `path` on a background thread; the window stays
+    /// responsive and the document appears when it is ready.
     pub fn open_path(&mut self, path: &Path, ctx: &egui::Context) {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if let Some(i) = self.windows.iter().position(|w| w.view.path.as_deref() == Some(canonical.as_path()))
@@ -123,27 +138,55 @@ impl RustsheetApp {
             self.focus_window(ctx, i);
             return;
         }
-        let started = Instant::now();
-        match io::open(&canonical) {
-            Ok(sheet) => {
-                if let Some(bench) = &mut self.bench {
-                    bench.loaded(&canonical, started.elapsed(), &sheet);
+        if self.loading.iter().any(|l| l.path == canonical) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let thread_path = canonical.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(io::open(&thread_path));
+            ctx.request_repaint();
+        });
+        self.loading.push(Loading { path: canonical, started: Instant::now(), result: rx });
+    }
+
+    /// Picks up documents that finished loading.
+    fn finish_loads(&mut self) {
+        let mut i = 0;
+        while i < self.loading.len() {
+            let result = match self.loading[i].result.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    i += 1;
+                    continue;
                 }
-                let doc = Document::new(sheet);
-                let active = self.active_index();
-                if self.windows.get(active).is_some_and(|w| w.view.is_pristine()) {
-                    self.windows[active].view = SheetView::new(doc, Some(canonical.clone()), 0);
-                } else {
-                    let id = self.new_window(Some((doc, canonical.clone())));
-                    self.active = id;
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err(io::IoError::Format("het inlezen is onverwacht gestopt".into()))
                 }
-                self.recent.add(&canonical);
-                self.refresh_recent();
-            }
-            Err(e) => {
-                self.recent.remove(&canonical);
-                self.refresh_recent();
-                error_dialog("Kan bestand niet openen", &format!("{}\n\n{e}", canonical.display()));
+            };
+            let Loading { path, started, .. } = self.loading.remove(i);
+            match result {
+                Ok(sheet) => {
+                    if let Some(bench) = &mut self.bench {
+                        bench.loaded(&path, started.elapsed(), &sheet);
+                    }
+                    let doc = Document::new(sheet);
+                    let active = self.active_index();
+                    if self.windows.get(active).is_some_and(|w| w.view.is_pristine()) {
+                        self.windows[active].view = SheetView::new(doc, Some(path.clone()), 0);
+                    } else {
+                        let id = self.new_window(Some((doc, path.clone())));
+                        self.active = id;
+                    }
+                    self.recent.add(&path);
+                    self.refresh_recent();
+                }
+                Err(e) => {
+                    self.recent.remove(&path);
+                    self.refresh_recent();
+                    error_dialog("Kan bestand niet openen", &format!("{}\n\n{e}", path.display()));
+                }
             }
         }
     }
@@ -340,16 +383,35 @@ impl eframe::App for RustsheetApp {
                 self.command(command, &ctx);
             }
         }
+        self.finish_loads();
+        match self.loading.first() {
+            Some(loading) => {
+                let name = loading.path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into());
+                let index = self.active_index();
+                self.windows[index].view.status = Some(format!("{name} openen…"));
+                self.loading_status = Some(self.windows[index].id);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Progress);
+            }
+            None => {
+                if let Some(i) = self.loading_status.take().and_then(|id| self.index_of(id)) {
+                    self.windows[i].view.status = None;
+                }
+                if let Some(range) = self.pending_select.take() {
+                    let index = self.active_index();
+                    self.windows[index].view.jump_to(&range);
+                }
+            }
+        }
         if let Some(bench) = &mut self.bench
             && let Some(window) = self.windows.first_mut()
-            && bench.step(&ctx, frame, &mut window.view)
+            && bench.step(&ctx, frame, &mut window.view, self.loading.is_empty())
         {
             self.quitting = true;
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
         }
 
         if let Some(shot) = &mut self.shot
-            && shot.step(&ctx)
+            && shot.step(&ctx, self.loading.is_empty())
         {
             self.quitting = true;
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);

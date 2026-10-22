@@ -18,6 +18,7 @@ pub struct Bench {
     cpu_ms: Vec<f32>,
     interval_ms: Vec<f32>,
     last: Option<Instant>,
+    finished: bool,
 }
 
 const WARMUP: u32 = 20;
@@ -34,6 +35,7 @@ impl Bench {
             cpu_ms: Vec::new(),
             interval_ms: Vec::new(),
             last: None,
+            finished: false,
         }
     }
 
@@ -42,12 +44,20 @@ impl Bench {
     }
 
     /// Advances one frame; returns true when the run is finished.
-    pub fn step(&mut self, ctx: &egui::Context, frame: &eframe::Frame, view: &mut SheetView) -> bool {
+    /// `ready` is false while files are still loading; measuring starts after.
+    pub fn step(&mut self, ctx: &egui::Context, frame: &eframe::Frame, view: &mut SheetView, ready: bool) -> bool {
+        if self.finished {
+            return true;
+        }
         let now = Instant::now();
-        self.seen += 1;
         if self.first_frame.is_none() {
             self.first_frame = Some(self.process_start.elapsed());
         }
+        if !ready {
+            ctx.request_repaint();
+            return false;
+        }
+        self.seen += 1;
         if self.seen > WARMUP {
             if let Some(cpu) = frame.info().cpu_usage {
                 self.cpu_ms.push(cpu * 1000.0);
@@ -73,6 +83,7 @@ impl Bench {
             return false;
         }
         self.report();
+        self.finished = true;
         true
     }
 
@@ -129,9 +140,12 @@ impl Shot {
         Self { path, after_frames: 30, quit, seen: 0, requested: false, done: Default::default() }
     }
 
-    /// Call once per frame; returns true when the app may quit.
-    pub fn step(&mut self, ctx: &egui::Context) -> bool {
-        self.seen += 1;
+    /// Call once per frame; returns true when the app may quit. Frames are
+    /// only counted once `ready` (files loaded).
+    pub fn step(&mut self, ctx: &egui::Context, ready: bool) -> bool {
+        if ready {
+            self.seen += 1;
+        }
         if !self.requested && self.seen >= self.after_frames {
             self.requested = true;
             let path = self.path.clone();
