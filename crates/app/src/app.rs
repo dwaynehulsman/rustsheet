@@ -54,6 +54,46 @@ fn viewport_of(id: u64, index: usize) -> ViewportId {
     if index == 0 { ViewportId::ROOT } else { ViewportId::from_hash_of(("document", id)) }
 }
 
+/// The message for a dropped file Rustsheet cannot read.
+pub fn unsupported_message(path: &Path) -> String {
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into());
+    let kinds: Vec<String> = OPEN_EXTENSIONS.iter().map(|e| format!(".{e}")).collect();
+    format!("“{name}” kan niet worden geopend. Rustsheet opent {}.", kinds.join(", "))
+}
+
+/// The highlight over a window while files are dragged onto it.
+fn paint_drop_target(ui: &egui::Ui, window: u64, files: &[PathBuf]) {
+    let ok = files.iter().all(|f| FileKind::of(f).is_some());
+    let rect = ui.ctx().content_rect().shrink(6.0);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique(("drop-target", window)),
+    ));
+    let (fill, stroke) = if ok {
+        (egui::Color32::from_rgba_unmultiplied(10, 132, 255, 36), egui::Color32::from_rgb(10, 132, 255))
+    } else {
+        (egui::Color32::from_rgba_unmultiplied(220, 50, 50, 36), egui::Color32::from_rgb(200, 40, 40))
+    };
+    painter.rect_filled(rect, 12.0, fill);
+    painter.rect_stroke(rect, 12.0, egui::Stroke::new(3.0, stroke), egui::StrokeKind::Inside);
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|f| f.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .take(3)
+        .collect();
+    let title = if ok { "Laat los om te openen" } else { "Dit bestandstype kan Rustsheet niet openen" };
+    let center = rect.center();
+    let galley = painter.layout_no_wrap(title.to_string(), egui::FontId::proportional(22.0), stroke);
+    let names_galley =
+        painter.layout_no_wrap(names.join(", "), egui::FontId::proportional(14.0), ui.visuals().text_color());
+    let box_w = galley.size().x.max(names_galley.size().x) + 40.0;
+    let bg = egui::Rect::from_center_size(center, egui::vec2(box_w, 80.0));
+    painter.rect_filled(bg, 10.0, ui.visuals().panel_fill);
+    painter.galley(center - egui::vec2(galley.size().x / 2.0, 28.0), galley, stroke);
+    painter.galley(center - egui::vec2(names_galley.size().x / 2.0, -8.0), names_galley, egui::Color32::GRAY);
+}
+
 fn error_dialog(title: &str, message: &str) {
     MessageDialog::new()
         .set_level(MessageLevel::Error)
@@ -386,9 +426,18 @@ impl RustsheetApp {
         index: usize,
         requests: &mut Vec<Request>,
         closing: &mut Vec<u64>,
+        drops: &mut Vec<(u64, PathBuf)>,
     ) {
         let ctx = ui.ctx().clone();
         let window = &mut self.windows[index];
+        // Files dragged over or dropped onto this window.
+        let (hovered, dropped): (Vec<PathBuf>, Vec<PathBuf>) = ctx.input(|i| {
+            (
+                i.raw.hovered_files.iter().filter_map(|h| h.path.clone()).collect(),
+                i.raw.dropped_files.iter().map(|d| d.path().to_path_buf()).collect(),
+            )
+        });
+        drops.extend(dropped.into_iter().map(|p| (window.id, p)));
         let (focused, close) = ctx.input(|i| (i.viewport().focused, i.viewport().close_requested()));
         if focused == Some(true) {
             self.active = window.id;
@@ -403,6 +452,9 @@ impl RustsheetApp {
         }
         let mut env = Env { clip: &mut self.clip, window: window.id, requests };
         window.view.ui(ui, &mut env);
+        if !hovered.is_empty() {
+            paint_drop_target(ui, window.id, &hovered);
+        }
     }
 
     fn handle_closes(&mut self, ctx: &egui::Context, closing: Vec<u64>) {
@@ -490,7 +542,8 @@ impl eframe::App for RustsheetApp {
 
         let mut requests = Vec::new();
         let mut closing = Vec::new();
-        self.show_window(ui, 0, &mut requests, &mut closing);
+        let mut drops = Vec::new();
+        self.show_window(ui, 0, &mut requests, &mut closing, &mut drops);
         for index in 1..self.windows.len() {
             let id = self.windows[index].id;
             let builder = ViewportBuilder::default()
@@ -498,8 +551,19 @@ impl eframe::App for RustsheetApp {
                 .with_inner_size([1100.0, 720.0])
                 .with_min_inner_size([480.0, 320.0]);
             ctx.show_viewport_immediate(viewport_of(id, index), builder, |ui, _class| {
-                self.show_window(ui, index, &mut requests, &mut closing);
+                self.show_window(ui, index, &mut requests, &mut closing, &mut drops);
             });
+        }
+
+        // Dropped files open like Open: a fresh window is reused, otherwise
+        // each gets its own window, so nothing unsaved is replaced.
+        for (window, path) in drops {
+            if FileKind::of(&path).is_some() {
+                self.active = window;
+                self.open_path(&path, &ctx);
+            } else if let Some(i) = self.index_of(window) {
+                self.windows[i].view.status = Some(unsupported_message(&path));
+            }
         }
 
         for request in requests {

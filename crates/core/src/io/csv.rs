@@ -19,7 +19,9 @@ pub fn read_csv(path: &Path, sheet_name: &str) -> Result<Workbook, IoError> {
         Ok(s) => s,
         Err(e) => decode_cp1252(e.as_bytes()),
     };
-    read_csv_str(&text, sheet_name)
+    // A .tsv file is tab-separated even if commas outnumber tabs in its first line.
+    let tsv = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("tsv"));
+    read_delimited(&text, sheet_name, tsv.then_some(b'\t'))
 }
 
 fn decode_cp1252(bytes: &[u8]) -> String {
@@ -57,11 +59,16 @@ fn detect_delimiter(text: &str) -> u8 {
 
 /// Reads CSV text into a one-sheet workbook.
 pub fn read_csv_str(text: &str, sheet_name: &str) -> Result<Workbook, IoError> {
+    read_delimited(text, sheet_name, None)
+}
+
+/// Reads delimited text; `delimiter` `None` detects it from the first line.
+pub fn read_delimited(text: &str, sheet_name: &str, delimiter: Option<u8>) -> Result<Workbook, IoError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut reader = ::csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
-        .delimiter(detect_delimiter(text))
+        .delimiter(delimiter.unwrap_or_else(|| detect_delimiter(text)))
         .from_reader(text.as_bytes());
     let mut sheet = Sheet::new(sheet_name);
     for (r, record) in reader.records().enumerate() {
@@ -208,6 +215,48 @@ mod tests {
             let at = CellRef::new(i, 0);
             assert_eq!(back.value(at), sheet.value(at), "row {i}");
         }
+    }
+
+    fn grid(book: &Workbook, rows: u32, cols: u32) -> Vec<Vec<String>> {
+        (0..rows).map(|r| (0..cols).map(|c| book.sheet(0).display(CellRef::new(r, c))).collect()).collect()
+    }
+
+    #[test]
+    fn reads_every_common_variant() {
+        let expected = vec![
+            vec!["Naam".to_string(), "Prijs".to_string(), "Opmerking".to_string()],
+            vec!["Thee".to_string(), "2.5".to_string(), "groen, los".to_string()],
+            vec!["Kaas".to_string(), "4".to_string(), "".to_string()],
+        ];
+        for (label, text) in [
+            ("comma", "Naam,Prijs,Opmerking\nThee,2.5,\"groen, los\"\nKaas,4,\n"),
+            ("semicolon", "Naam;Prijs;Opmerking\r\nThee;2.5;groen, los\r\nKaas;4;\r\n"),
+            ("tab", "Naam\tPrijs\tOpmerking\nThee\t2.5\tgroen, los\nKaas\t4\t\n"),
+            ("bom", "\u{feff}Naam,Prijs,Opmerking\nThee,2.5,\"groen, los\"\nKaas,4,"),
+        ] {
+            let book = read_csv_str(text, "t").unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_eq!(grid(&book, 3, 3), expected, "{label}");
+        }
+        // Ragged rows and a missing final newline are fine.
+        let book = read_csv_str("a,b,c\n1\n2,3", "t").unwrap();
+        assert_eq!(grid(&book, 3, 3)[2], ["2", "3", ""]);
+    }
+
+    #[test]
+    fn tsv_files_are_always_tab_separated_and_legacy_files_decode() {
+        let dir = std::env::temp_dir().join(format!("rustsheet-csv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tsv = dir.join("lijst.tsv");
+        std::fs::write(&tsv, "Naam, voluit\tStad\nJansen, P.\tDelft\n").unwrap();
+        let book = crate::io::open(&tsv).unwrap();
+        assert_eq!(book.sheet(0).name(), "lijst");
+        assert_eq!(grid(&book, 2, 2), [["Naam, voluit", "Stad"], ["Jansen, P.", "Delft"]]);
+
+        let legacy = dir.join("oud.csv");
+        std::fs::write(&legacy, b"Plaats;Prijs\nCaf\xe9;\x80 3\n").unwrap();
+        let book = crate::io::open(&legacy).unwrap();
+        assert_eq!(book.sheet(0).display(CellRef::new(1, 0)), "Café");
+        assert_eq!(book.sheet(0).value(CellRef::new(1, 1)), &Value::Number(3.0));
     }
 
     #[test]

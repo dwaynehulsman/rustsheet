@@ -711,3 +711,15 @@ fn autofilter_hides_rows_by_value() {
     command(&mut h, Command::ToggleFilter);
     assert!(h.state().view.sheet().filter().is_none());
 }
+
+#[test]
+fn unknown_dropped_files_get_a_clear_message() {
+    use rustsheet_core::io::FileKind;
+    let ok = ["map.xlsx", "oud.XLS", "macro.xlsm", "data.ods", "lijst.csv", "tabel.tsv"];
+    for name in ok {
+        assert!(FileKind::of(std::path::Path::new(name)).is_some(), "{name}");
+    }
+    let message = crate::app::unsupported_message(std::path::Path::new("/tmp/foto.png"));
+    assert!(message.starts_with("“foto.png” kan niet worden geopend"), "{message}");
+    assert!(message.contains(".xlsx") && message.contains(".tsv"));
+}

@@ -70,6 +70,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
       <array>
         <string>public.comma-separated-values-text</string>
         <string>public.tab-separated-values-text</string>
+        <string>public.delimited-values-text</string>
       </array>
       <key>CFBundleTypeExtensions</key><array><string>csv</string><string>tsv</string></array>
     </dict>
