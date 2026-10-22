@@ -313,6 +313,7 @@ impl Parser {
         let mut lhs = self.prefix()?;
         // Operators of this level accumulate into one flat chain.
         let mut chain: Vec<(BinOp, Expr)> = Vec::new();
+        let mut percents = 0;
         let close = |lhs: Expr, chain: &mut Vec<(BinOp, Expr)>| {
             if chain.is_empty() { lhs } else { Expr::Binary(Box::new(lhs), std::mem::take(chain)) }
         };
@@ -323,6 +324,12 @@ impl Parser {
                         break;
                     }
                     self.next();
+                    // Postfix % nests without recursing here, so count it
+                    // against the same depth budget.
+                    percents += 1;
+                    if self.depth + percents > MAX_DEPTH {
+                        return self.err("formule is te diep genest");
+                    }
                     lhs = Expr::Percent(Box::new(close(lhs, &mut chain)));
                 }
                 Tok::Op(op) => {
@@ -581,6 +588,8 @@ mod tests {
         assert!(parse_formula("=#DIV/é").is_err());
         assert!(parse_formula(&format!("={}1{}", "(".repeat(10_000), ")".repeat(10_000))).is_err());
         assert!(parse_formula(&format!("={}1", "-".repeat(10_000))).is_err());
+        assert!(parse_formula(&format!("=1{}", "%".repeat(8_000))).is_err());
+        assert!(parse_formula("=50%%").is_ok());
         assert!(parse_formula(&format!("=SUM({}", "SUM(".repeat(5_000))).is_err());
         assert!(parse_formula(&format!("={}", "1+".repeat(5_000))).is_err());
         assert!(parse_formula(&format!("={}", "(1)+".repeat(100) + "1")).is_ok());

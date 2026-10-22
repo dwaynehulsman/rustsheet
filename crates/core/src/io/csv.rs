@@ -90,7 +90,7 @@ pub fn read_csv_str(text: &str, sheet_name: &str) -> Result<Sheet, IoError> {
 
 /// Characters that make Excel, Numbers and LibreOffice treat a CSV field as
 /// a formula.
-const FORMULA_TRIGGERS: [char; 4] = ['=', '+', '-', '@'];
+const FORMULA_TRIGGERS: [char; 6] = ['=', '+', '-', '@', '\t', '\r'];
 
 /// The displayed value of a cell as a CSV field. Text that another
 /// spreadsheet would execute as a formula gets a leading `'`, the usual
@@ -98,7 +98,9 @@ const FORMULA_TRIGGERS: [char; 4] = ['=', '+', '-', '@'];
 fn csv_field(sheet: &Sheet, at: CellRef) -> String {
     let text = sheet.display(at);
     let is_text = matches!(sheet.value(at), Value::Text(_));
-    if is_text && (text.starts_with(FORMULA_TRIGGERS) || text.starts_with('\'')) {
+    // Some programs trim leading spaces before deciding, so look past them.
+    let lead = text.trim_start_matches(' ');
+    if is_text && (lead.starts_with(FORMULA_TRIGGERS) || text.starts_with('\'')) {
         format!("'{text}")
     } else {
         text
@@ -164,7 +166,17 @@ mod tests {
     #[test]
     fn escapes_text_that_would_run_as_a_formula() {
         let mut sheet = Sheet::new("Blad1");
-        let inputs = ["'=HYPERLINK(\"http://x\")", "'+1", "-tekst", "@SUM(1)", "''quote", "=1+1", "-5"];
+        let inputs = [
+            "'=HYPERLINK(\"http://x\")",
+            "'+1",
+            "-tekst",
+            "@SUM(1)",
+            "''quote",
+            "=1+1",
+            "-5",
+            "  =1+1",
+            "\tx",
+        ];
         for (i, text) in inputs.iter().enumerate() {
             let p = parse_input(text).unwrap();
             sheet.set_states(vec![(
@@ -175,7 +187,7 @@ mod tests {
         let text = write_csv_string(&sheet);
         assert_eq!(
             text,
-            "\"'=HYPERLINK(\"\"http://x\"\")\"\r\n'+1\r\n'-tekst\r\n'@SUM(1)\r\n''quote\r\n2\r\n-5\r\n"
+            "\"'=HYPERLINK(\"\"http://x\"\")\"\r\n'+1\r\n'-tekst\r\n'@SUM(1)\r\n''quote\r\n2\r\n-5\r\n'  =1+1\r\n'\tx\r\n"
         );
         let back = read_csv_str(&text, "Blad1").unwrap();
         for i in 0..inputs.len() as u32 {
