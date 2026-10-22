@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "rustsheet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "eframe",
@@ -3063,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "rustsheet-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "calamine",
  "csv",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "rustsheet-icon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tiny-skia",
 ]
