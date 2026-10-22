@@ -128,6 +128,13 @@ impl SheetView {
         (digits * 7.6 + 16.0).max(40.0)
     }
 
+    /// Screen centre of a cell as laid out last frame.
+    #[cfg(test)]
+    pub fn cell_center(&self, at: CellRef) -> Pos2 {
+        let g = self.geometry(self.grid_rect);
+        self.range_rect(&g, Range::single(at)).center()
+    }
+
     fn geometry(&self, rect: Rect) -> Geometry {
         let sheet = self.sheet();
         let rh = self.row_header_width();
@@ -296,8 +303,10 @@ impl SheetView {
     pub fn grid(&mut self, ui: &mut Ui, env: &mut Env<'_>) {
         let (grid_id, editor_id, bar_id, _) = self.ids(env.window);
         let rect = ui.available_rect_before_wrap();
+        self.grid_rect = rect;
         let response = ui.interact(rect, grid_id, Sense::click_and_drag());
         ui.advance_cursor_after_rect(rect);
+        crate::view::accessible_name(ui, &response, "Werkblad");
 
         if self.grid_focus_pending && self.edit.is_none() {
             response.request_focus();
@@ -431,7 +440,8 @@ impl SheetView {
             self.drag = Drag::None;
         }
 
-        if response.double_clicked() {
+        let double = ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+        if double && response.contains_pointer() {
             match self.zone(g, pos) {
                 Some(Zone::Cell(at)) if self.edit.is_none() && at == self.sel.active => {
                     self.begin_edit(None, false)
@@ -810,6 +820,16 @@ impl SheetView {
 
         ui.painter().rect_filled(rect, 0.0, p.background);
         let edit = self.edit.as_mut().expect("editing");
+        // Clicking a cell to insert a reference takes focus away; take it
+        // back before the field runs so this frame's typing lands in it.
+        if edit.focus_pending || ui.memory(|m| m.focused().is_none()) {
+            ui.memory_mut(|m| m.request_focus(editor_id));
+            edit.focus_pending = false;
+        }
+        if edit.cursor_to_end {
+            crate::view::cursor_to_end(ui, editor_id, &edit.text);
+            edit.cursor_to_end = false;
+        }
         let response = ui.put(
             rect.shrink2(vec2(PAD - 2.0, 2.0)),
             egui::TextEdit::singleline(&mut edit.text)
@@ -818,12 +838,10 @@ impl SheetView {
                 .font(font)
                 .text_color(p.text)
                 .desired_width(rect.width() - 2.0 * PAD)
-                .cursor_at_end(true),
+                .cursor_at_end(true)
+                .event_filter(crate::view::EDIT_KEYS),
         );
-        if edit.focus_pending {
-            response.request_focus();
-            edit.focus_pending = false;
-        }
+        crate::view::accessible_name(ui, &response, "Celinhoud");
         ui.painter().rect_stroke(rect, 0.0, Stroke::new(2.0, p.accent), StrokeKind::Outside);
     }
 }

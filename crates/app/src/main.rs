@@ -7,6 +7,8 @@ mod fonts;
 mod grid;
 mod menu;
 mod recent;
+#[cfg(test)]
+mod tests;
 mod view;
 
 use std::path::PathBuf;
@@ -17,6 +19,8 @@ fn main() -> eframe::Result {
     let mut files = Vec::new();
     let mut bench_frames: Option<u32> = None;
     let mut bench_out = None;
+    let mut shot = None;
+    let mut select = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -25,6 +29,11 @@ fn main() -> eframe::Result {
                 bench_frames = args.next().and_then(|n| n.to_str().and_then(|s| s.parse().ok()));
             }
             Some("--bench-out") => bench_out = args.next().map(PathBuf::from),
+            Some("--screenshot") => shot = args.next().map(|p| bench::Shot::new(PathBuf::from(p), false)),
+            Some("--screenshot-and-quit") => {
+                shot = args.next().map(|p| bench::Shot::new(PathBuf::from(p), true))
+            }
+            Some("--select") => select = args.next().and_then(|s| s.into_string().ok()),
             // Finder passes a process serial number on older systems.
             Some(s) if s.starts_with("-psn_") => {}
             _ => files.push(PathBuf::from(arg)),
@@ -44,6 +53,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Rustsheet",
         options,
-        Box::new(move |cc| Ok(Box::new(app::RustsheetApp::new(cc, files, bench)))),
+        Box::new(move |cc| Ok(Box::new(app::RustsheetApp::new(cc, files, bench, shot, select)))),
     )
 }

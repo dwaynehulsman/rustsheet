@@ -61,6 +61,9 @@ pub struct Edit {
     /// Being edited in the formula bar rather than in the cell.
     pub in_bar: bool,
     pub focus_pending: bool,
+    /// Move the text cursor to the end on the next frame, after the text
+    /// changed outside the text field.
+    pub cursor_to_end: bool,
     /// Reference being inserted by clicking cells while typing a formula:
     /// byte offset where it starts and the cell the drag started on.
     pub point: Option<(usize, CellRef)>,
@@ -92,6 +95,8 @@ pub struct SheetView {
     pub(crate) page_rows: u32,
     pub(crate) scroll_into_view: bool,
     pub(crate) grid_focus_pending: bool,
+    /// Where the grid was drawn last frame, for tests and hit testing.
+    pub(crate) grid_rect: egui::Rect,
 }
 
 impl SheetView {
@@ -112,6 +117,7 @@ impl SheetView {
             page_rows: 20,
             scroll_into_view: false,
             grid_focus_pending: true,
+            grid_rect: egui::Rect::NOTHING,
         }
     }
 
@@ -243,7 +249,8 @@ impl SheetView {
             let state = self.sheet().state(cell);
             edit_text(&state.content, state.format.num)
         });
-        self.edit = Some(Edit { cell, text, typed, in_bar, focus_pending: true, point: None });
+        self.edit =
+            Some(Edit { cell, text, typed, in_bar, focus_pending: true, cursor_to_end: true, point: None });
         self.status = None;
         self.scroll_into_view = true;
     }
@@ -268,7 +275,7 @@ impl SheetView {
             }
             Err(e) => {
                 self.status = Some(format!("Formule klopt niet: {e}"));
-                self.edit = Some(Edit { focus_pending: true, point: None, ..edit });
+                self.edit = Some(Edit { focus_pending: true, cursor_to_end: false, point: None, ..edit });
                 false
             }
         }
@@ -308,6 +315,7 @@ impl SheetView {
         edit.text.truncate(start);
         edit.text.push_str(&Range::new(anchor, to).to_string());
         edit.focus_pending = true;
+        edit.cursor_to_end = true;
     }
 
     pub fn end_point(&mut self) {
@@ -455,18 +463,10 @@ impl SheetView {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let mut clicked = None;
-            if ui
-                .add_enabled(self.doc.can_undo(), egui::Button::new("↶"))
-                .on_hover_text("Herstel (⌘Z)")
-                .clicked()
-            {
+            if icon_button(ui, self.doc.can_undo(), false).on_hover_text("Herstel (⌘Z)").clicked() {
                 clicked = Some(Command::Undo);
             }
-            if ui
-                .add_enabled(self.doc.can_redo(), egui::Button::new("↷"))
-                .on_hover_text("Opnieuw (⇧⌘Z)")
-                .clicked()
-            {
+            if icon_button(ui, self.doc.can_redo(), true).on_hover_text("Opnieuw (⇧⌘Z)").clicked() {
                 clicked = Some(Command::Redo);
             }
             ui.separator();
@@ -487,7 +487,7 @@ impl SheetView {
             }
             ui.separator();
             let mut num = format.num;
-            egui::ComboBox::from_id_salt(("numfmt", env.window))
+            let combo = egui::ComboBox::from_id_salt(("numfmt", env.window))
                 .selected_text(num.label())
                 .width(110.0)
                 .show_ui(ui, |ui| {
@@ -495,6 +495,7 @@ impl SheetView {
                         ui.selectable_value(&mut num, f, f.label());
                     }
                 });
+            accessible_name(ui, &combo.response, "Getalnotatie");
             if num != format.num {
                 clicked = Some(Command::NumFmt(num));
             }
@@ -520,6 +521,7 @@ impl SheetView {
                     .desired_width(90.0)
                     .align(egui::Align2::CENTER_CENTER),
             );
+            accessible_name(ui, &name, "Celadres");
             if name.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 self.jump_to(&self.name_text.clone());
                 self.grid_focus_pending = true;
@@ -541,8 +543,10 @@ impl SheetView {
                 egui::TextEdit::singleline(text)
                     .id(bar_id)
                     .desired_width(f32::INFINITY)
-                    .font(egui::FontId::monospace(13.0)),
+                    .font(egui::FontId::monospace(13.0))
+                    .event_filter(EDIT_KEYS),
             );
+            accessible_name(ui, &response, "Formulebalk");
             if let Some(edit) = &mut self.edit
                 && edit.in_bar
                 && edit.focus_pending
@@ -566,7 +570,7 @@ impl SheetView {
         });
     }
 
-    fn jump_to(&mut self, text: &str) {
+    pub fn jump_to(&mut self, text: &str) {
         let text = text.trim().to_ascii_uppercase();
         let target = match text.split_once(':') {
             Some((a, b)) => CellRef::parse(a).zip(CellRef::parse(b)).map(|(a, b)| Selection::span(a, b)),
@@ -620,8 +624,61 @@ impl SheetView {
     }
 }
 
+/// Gives a widget a name for VoiceOver and other assistive technology.
+pub fn accessible_name(ui: &Ui, response: &egui::Response, name: &str) {
+    ui.ctx().accesskit_node_builder(response.id, |node| node.set_label(name.to_string()));
+}
+
+/// A toolbar button with a hand-drawn undo (or, mirrored, redo) arrow, so
+/// it does not depend on a font having the glyph.
+fn icon_button(ui: &mut Ui, enabled: bool, redo: bool) -> egui::Response {
+    let size = egui::vec2(26.0, 22.0);
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    accessible_name(ui, &response, if redo { "Opnieuw" } else { "Herstel" });
+    let visuals = if enabled { ui.style().interact(&response) } else { &ui.visuals().widgets.noninteractive };
+    if response.hovered() && enabled {
+        ui.painter().rect_filled(rect, 4.0, visuals.weak_bg_fill);
+    }
+    let color = if enabled { visuals.fg_stroke.color } else { ui.visuals().weak_text_color() };
+    let stroke = egui::Stroke::new(1.6, color);
+    let c = rect.center() + egui::vec2(0.0, 1.5);
+    let flip = if redo { -1.0 } else { 1.0 };
+    // A half-circle arc on the right with a tail ending in an arrowhead.
+    let r = 5.0;
+    let mut points: Vec<egui::Pos2> = (0..=12)
+        .map(|i| {
+            let a = std::f32::consts::PI * (i as f32 / 12.0) - std::f32::consts::FRAC_PI_2;
+            c + egui::vec2(flip * r * a.cos(), r * a.sin())
+        })
+        .collect();
+    points.reverse();
+    let tip = c + egui::vec2(-flip * 5.0, -r);
+    points.push(tip);
+    ui.painter().add(egui::Shape::line(points, stroke));
+    ui.painter().add(egui::Shape::line(
+        vec![tip + egui::vec2(flip * 3.0, -3.0), tip, tip + egui::vec2(flip * 3.0, 3.0)],
+        stroke,
+    ));
+    response
+}
+
 fn key_event(key: Key, modifiers: Modifiers) -> Event {
     Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+}
+
+/// Keys a cell or formula-bar editor keeps for itself instead of letting
+/// egui move focus with them; Enter, Tab and Escape are handled by
+/// [`take_edit_keys`].
+pub const EDIT_KEYS: egui::EventFilter =
+    egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
+
+/// Puts the text cursor of field `id` at the end of `text`.
+pub fn cursor_to_end(ui: &Ui, id: egui::Id, text: &str) {
+    let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+    let end = egui::text::CCursor::new(text.chars().count());
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+    state.store(ui.ctx(), id);
 }
 
 /// Removes the first press of `key` from this frame's input and returns its modifiers.

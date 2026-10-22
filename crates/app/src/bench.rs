@@ -112,3 +112,60 @@ impl Bench {
         }
     }
 }
+
+/// `--screenshot <path>`: saves what the first window rendered, read back
+/// from the GPU, once the window has settled.
+pub struct Shot {
+    pub path: PathBuf,
+    pub after_frames: u32,
+    pub quit: bool,
+    seen: u32,
+    requested: bool,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Shot {
+    pub fn new(path: PathBuf, quit: bool) -> Self {
+        Self { path, after_frames: 30, quit, seen: 0, requested: false, done: Default::default() }
+    }
+
+    /// Call once per frame; returns true when the app may quit.
+    pub fn step(&mut self, ctx: &egui::Context) -> bool {
+        self.seen += 1;
+        if !self.requested && self.seen >= self.after_frames {
+            self.requested = true;
+            let path = self.path.clone();
+            let done = self.done.clone();
+            let ctx2 = ctx.clone();
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
+                    if let Err(e) = save_png(&path, &image) {
+                        eprintln!("schermafbeelding mislukt: {e}");
+                    } else {
+                        println!("schermafbeelding: {}", path.display());
+                    }
+                    done.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ctx2.request_repaint();
+                })),
+            );
+        }
+        // The screenshot arrives with a later frame, so keep frames coming.
+        if !self.done.load(std::sync::atomic::Ordering::SeqCst) {
+            ctx.request_repaint();
+        }
+        self.quit && self.done.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let [w, h] = image.size;
+    let mut encoder = png::Encoder::new(file, w as u32, h as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_srgba_unmultiplied()).collect();
+    writer.write_image_data(&bytes)?;
+    Ok(())
+}

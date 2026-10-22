@@ -9,7 +9,7 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, Messag
 use rustsheet_core::io::{self, FileKind, OPEN_EXTENSIONS};
 use rustsheet_core::{Document, Sheet};
 
-use crate::bench::Bench;
+use crate::bench::{Bench, Shot};
 use crate::clip::ClipState;
 use crate::menu::{AppMenu, Command};
 use crate::recent::RecentFiles;
@@ -33,6 +33,7 @@ pub struct RustsheetApp {
     quitting: bool,
     undo_state: (bool, bool),
     bench: Option<Bench>,
+    shot: Option<Shot>,
 }
 
 fn viewport_of(id: u64, index: usize) -> ViewportId {
@@ -49,7 +50,13 @@ fn error_dialog(title: &str, message: &str) {
 }
 
 impl RustsheetApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>, bench: Option<Bench>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        files: Vec<PathBuf>,
+        bench: Option<Bench>,
+        shot: Option<Shot>,
+        select: Option<String>,
+    ) -> Self {
         crate::fonts::install(&cc.egui_ctx);
         cc.egui_ctx.options_mut(|o| o.input_options.line_scroll_speed = 44.0);
         let ctx = cc.egui_ctx.clone();
@@ -68,10 +75,14 @@ impl RustsheetApp {
             quitting: false,
             undo_state: (true, true),
             bench,
+            shot,
         };
         app.new_window(None);
         for path in files {
             app.open_path(&path, &cc.egui_ctx);
+        }
+        if let Some(range) = select {
+            app.windows[0].view.jump_to(&range);
         }
         app
     }
@@ -332,6 +343,13 @@ impl eframe::App for RustsheetApp {
         if let Some(bench) = &mut self.bench
             && let Some(window) = self.windows.first_mut()
             && bench.step(&ctx, frame, &mut window.view)
+        {
+            self.quitting = true;
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+        }
+
+        if let Some(shot) = &mut self.shot
+            && shot.step(&ctx)
         {
             self.quitting = true;
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);

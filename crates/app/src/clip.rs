@@ -13,6 +13,8 @@ pub struct CutSource {
 
 pub struct ClipState {
     board: Option<arboard::Clipboard>,
+    /// Stands in for the pasteboard when it is unavailable (and in tests).
+    local: Option<String>,
     block: Option<Block>,
     /// The text we put on the pasteboard with `block`.
     text: String,
@@ -29,12 +31,33 @@ pub enum Pasted {
 
 impl ClipState {
     pub fn new() -> Self {
-        Self { board: arboard::Clipboard::new().ok(), block: None, text: String::new(), cut: None }
+        Self {
+            board: arboard::Clipboard::new().ok(),
+            local: None,
+            block: None,
+            text: String::new(),
+            cut: None,
+        }
+    }
+
+    /// A clipboard that never touches the system pasteboard.
+    #[cfg(test)]
+    pub fn detached() -> Self {
+        Self { board: None, local: None, block: None, text: String::new(), cut: None }
+    }
+
+    /// Puts plain text on the clipboard, as another application would.
+    #[cfg(test)]
+    pub fn set_foreign_text(&mut self, text: &str) {
+        self.local = Some(text.to_string());
     }
 
     pub fn set(&mut self, block: Block, text: String, cut: Option<CutSource>) {
-        if let Some(board) = &mut self.board {
-            let _ = board.set_text(text.clone());
+        match &mut self.board {
+            Some(board) => {
+                let _ = board.set_text(text.clone());
+            }
+            None => self.local = Some(text.clone()),
         }
         self.block = Some(block);
         self.text = text;
@@ -43,7 +66,10 @@ impl ClipState {
 
     /// Plain text on the pasteboard, for pasting into a text field.
     pub fn text(&mut self) -> Option<String> {
-        self.board.as_mut()?.get_text().ok()
+        match &mut self.board {
+            Some(board) => board.get_text().ok(),
+            None => self.local.clone(),
+        }
     }
 
     /// Decides what a paste inserts. A cut can be pasted only once, like in Excel.
