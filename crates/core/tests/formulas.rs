@@ -207,3 +207,13 @@ fn deleting_a_cell_updates_dependents() {
     set(&mut s, "A1", "");
     assert_eq!(s.display(c("D1")), "2");
 }
+
+#[test]
+fn longest_formula_chain_evaluates() {
+    // 4096 terms is the longest chain that fits Excel's 8192 character limit.
+    let formula = format!("={}", vec!["1"; 4096].join("+"));
+    let mut s = Sheet::new("Blad1");
+    set(&mut s, "A1", &formula);
+    assert_eq!(s.display(c("A1")), "4096");
+    assert_eq!(s.state(c("A1")).content.source(), formula);
+}

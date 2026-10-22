@@ -5,8 +5,9 @@ use std::path::Path;
 use super::IoError;
 use crate::addr::{CellRef, MAX_COLS, MAX_ROWS};
 use crate::format::CellFormat;
-use crate::input::{parse_input, parse_literal};
+use crate::input::{Content, Parsed, parse_input, parse_literal};
 use crate::sheet::{CellState, Sheet};
+use crate::value::Value;
 
 /// Reads a CSV file. The delimiter (`,`, `;` or tab) is detected from the
 /// first line; Dutch Excel writes `;`. Text that is not valid UTF-8 is read
@@ -68,7 +69,10 @@ pub fn read_csv_str(text: &str, sheet_name: &str) -> Result<Sheet, IoError> {
         }
         for (c, field) in record.iter().enumerate().take(MAX_COLS as usize) {
             // Formulas are kept when they parse; anything else stays a value.
-            let parsed = if field.starts_with('=') {
+            // A leading ' marks escaped text (see `csv_field`).
+            let parsed = if let Some(text) = field.strip_prefix('\'') {
+                Parsed { content: Content::Value(Value::Text(text.to_string())), format: None }
+            } else if field.starts_with('=') {
                 parse_input(field).unwrap_or_else(|_| parse_literal(field))
             } else {
                 parse_literal(field)
@@ -84,6 +88,23 @@ pub fn read_csv_str(text: &str, sheet_name: &str) -> Result<Sheet, IoError> {
     Ok(sheet)
 }
 
+/// Characters that make Excel, Numbers and LibreOffice treat a CSV field as
+/// a formula.
+const FORMULA_TRIGGERS: [char; 4] = ['=', '+', '-', '@'];
+
+/// The displayed value of a cell as a CSV field. Text that another
+/// spreadsheet would execute as a formula gets a leading `'`, the usual
+/// defence against CSV formula injection; [`read_csv`] strips it again.
+fn csv_field(sheet: &Sheet, at: CellRef) -> String {
+    let text = sheet.display(at);
+    let is_text = matches!(sheet.value(at), Value::Text(_));
+    if is_text && (text.starts_with(FORMULA_TRIGGERS) || text.starts_with('\'')) {
+        format!("'{text}")
+    } else {
+        text
+    }
+}
+
 /// CSV text of the used range, with displayed (formatted) values like Excel.
 pub fn write_csv_string(sheet: &Sheet) -> String {
     let mut writer = ::csv::WriterBuilder::new().terminator(::csv::Terminator::CRLF).from_writer(Vec::new());
@@ -91,7 +112,7 @@ pub fn write_csv_string(sheet: &Sheet) -> String {
         // Rows start at row 1 and column A so positions survive a round trip.
         for row in 0..=used.end.row {
             let fields: Vec<String> =
-                (0..=used.end.col).map(|col| sheet.display(CellRef::new(row, col))).collect();
+                (0..=used.end.col).map(|col| csv_field(sheet, CellRef::new(row, col))).collect();
             writer.write_record(&fields).expect("writing to memory");
         }
     }
@@ -105,7 +126,6 @@ pub fn write_csv(sheet: &Sheet, path: &Path) -> Result<(), IoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::Value;
 
     #[test]
     fn reads_semicolons_quotes_and_formulas() {
@@ -139,6 +159,29 @@ mod tests {
             assert_eq!(back.display(at), sheet.display(at), "{at}");
         }
         assert_eq!(back.value(CellRef::parse("B2").unwrap()), &Value::Number(3.5));
+    }
+
+    #[test]
+    fn escapes_text_that_would_run_as_a_formula() {
+        let mut sheet = Sheet::new("Blad1");
+        let inputs = ["'=HYPERLINK(\"http://x\")", "'+1", "-tekst", "@SUM(1)", "''quote", "=1+1", "-5"];
+        for (i, text) in inputs.iter().enumerate() {
+            let p = parse_input(text).unwrap();
+            sheet.set_states(vec![(
+                CellRef::new(i as u32, 0),
+                CellState { content: p.content, ..Default::default() },
+            )]);
+        }
+        let text = write_csv_string(&sheet);
+        assert_eq!(
+            text,
+            "\"'=HYPERLINK(\"\"http://x\"\")\"\r\n'+1\r\n'-tekst\r\n'@SUM(1)\r\n''quote\r\n2\r\n-5\r\n"
+        );
+        let back = read_csv_str(&text, "Blad1").unwrap();
+        for i in 0..inputs.len() as u32 {
+            let at = CellRef::new(i, 0);
+            assert_eq!(back.value(at), sheet.value(at), "row {i}");
+        }
     }
 
     #[test]

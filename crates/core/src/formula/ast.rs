@@ -154,7 +154,10 @@ pub enum Expr {
     Range(RangeAddr),
     Unary(UnaryOp, Box<Expr>),
     Percent(Box<Expr>),
-    Binary(BinOp, Box<Expr>, Box<Expr>),
+    /// A left-associative run of binary operators: `first op1 r1 op2 r2 ...`
+    /// means `((first op1 r1) op2 r2)`. Kept flat so long chains such as
+    /// `A1+A2+...+A4000` never make the tree (and recursion over it) deep.
+    Binary(Box<Expr>, Vec<(BinOp, Expr)>),
     /// Kept so a formula prints back exactly as it was grouped.
     Paren(Box<Expr>),
     /// Function call; the name is upper case without `_xlfn.` prefixes.
@@ -182,9 +185,10 @@ impl Expr {
             Expr::Range(r) => r.shifted(drow, dcol).map_or(Expr::Error(ErrorKind::Ref), Expr::Range),
             Expr::Unary(op, e) => Expr::Unary(*op, Box::new(e.shifted(drow, dcol))),
             Expr::Percent(e) => Expr::Percent(Box::new(e.shifted(drow, dcol))),
-            Expr::Binary(op, a, b) => {
-                Expr::Binary(*op, Box::new(a.shifted(drow, dcol)), Box::new(b.shifted(drow, dcol)))
-            }
+            Expr::Binary(first, rest) => Expr::Binary(
+                Box::new(first.shifted(drow, dcol)),
+                rest.iter().map(|(op, e)| (*op, e.shifted(drow, dcol))).collect(),
+            ),
             Expr::Paren(e) => Expr::Paren(Box::new(e.shifted(drow, dcol))),
             Expr::Call(name, args) => {
                 Expr::Call(name.clone(), args.iter().map(|a| a.shifted(drow, dcol)).collect())
@@ -209,9 +213,9 @@ impl Expr {
                 });
             }
             Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.precedents(own_sheet, out),
-            Expr::Binary(_, a, b) => {
-                a.precedents(own_sheet, out);
-                b.precedents(own_sheet, out);
+            Expr::Binary(first, rest) => {
+                first.precedents(own_sheet, out);
+                rest.iter().for_each(|(_, e)| e.precedents(own_sheet, out));
             }
             Expr::Call(_, args) => args.iter().for_each(|a| a.precedents(own_sheet, out)),
             _ => {}
@@ -267,7 +271,13 @@ impl fmt::Display for Expr {
             Expr::Unary(UnaryOp::Neg, e) => write!(f, "-{e}"),
             Expr::Unary(UnaryOp::Plus, e) => write!(f, "+{e}"),
             Expr::Percent(e) => write!(f, "{e}%"),
-            Expr::Binary(op, a, b) => write!(f, "{a}{}{b}", op.symbol()),
+            Expr::Binary(first, rest) => {
+                write!(f, "{first}")?;
+                for (op, rhs) in rest {
+                    write!(f, "{}{rhs}", op.symbol())?;
+                }
+                Ok(())
+            }
             Expr::Paren(e) => write!(f, "({e})"),
             Expr::Call(name, args) => {
                 write!(f, "{name}(")?;

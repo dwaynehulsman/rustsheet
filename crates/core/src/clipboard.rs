@@ -5,6 +5,9 @@ use crate::addr::{CellRef, Range};
 use crate::input::{Content, parse_literal};
 use crate::sheet::{CellState, Sheet};
 
+/// Most cells a tiled paste may write; larger selections get one copy.
+const MAX_TILED_CELLS: u64 = 1 << 21;
+
 /// A copied rectangle of cells.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
@@ -59,9 +62,15 @@ impl Block {
     /// like Excel. Relative references shift unless `keep_refs` is set,
     /// which is what a cut-and-paste wants.
     pub fn paste(&self, sheet: &Sheet, target: Range, keep_refs: bool) -> (Range, Vec<(CellRef, CellState)>) {
-        let tiles_down = if target.rows().is_multiple_of(self.rows) { target.rows() / self.rows } else { 1 };
-        let tiles_across =
+        let mut tiles_down =
+            if target.rows().is_multiple_of(self.rows) { target.rows() / self.rows } else { 1 };
+        let mut tiles_across =
             if target.cols().is_multiple_of(self.cols) { target.cols() / self.cols } else { 1 };
+        // Filling a whole sheet from one cell would mean billions of cells.
+        if u64::from(tiles_down) * u64::from(tiles_across) * self.cells.len().max(1) as u64 > MAX_TILED_CELLS
+        {
+            (tiles_down, tiles_across) = (1, 1);
+        }
         let start = target.start;
         let end = start
             .offset_clamped(i64::from(self.rows * tiles_down) - 1, i64::from(self.cols * tiles_across) - 1);
@@ -263,6 +272,20 @@ mod tests {
         assert_eq!(s.display(c("B1")), "1");
         assert_eq!(s.display(c("C1")), "");
         assert_eq!(s.display(c("D1")), "keep");
+    }
+
+    #[test]
+    fn huge_selection_pastes_once() {
+        let mut s = Sheet::new("Blad1");
+        set(&mut s, "A1", "1");
+        let block = Block::copy(&s, Range::single(c("A1")));
+        let all = Range::new(c("A1"), CellRef::new(crate::MAX_ROWS - 1, crate::MAX_COLS - 1));
+        let (area, changes) = block.paste(&s, all, false);
+        assert_eq!(area, Range::single(c("A1")));
+        assert_eq!(changes.len(), 1);
+        let column = Range::new(c("B1"), CellRef::new(crate::MAX_ROWS - 1, 1));
+        let (_, changes) = block.paste(&s, column, false);
+        assert_eq!(changes.len(), crate::MAX_ROWS as usize);
     }
 
     #[test]

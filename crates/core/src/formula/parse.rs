@@ -204,7 +204,7 @@ impl<'a> Lexer<'a> {
         let rest = &self.src[self.pos..];
         for e in ErrorKind::ALL {
             let lit = e.as_str();
-            if rest.len() >= lit.len() && rest[..lit.len()].eq_ignore_ascii_case(lit) {
+            if rest.get(..lit.len()).is_some_and(|head| head.eq_ignore_ascii_case(lit)) {
                 self.pos += lit.len();
                 return Ok(Tok::Error(e));
             }
@@ -227,10 +227,22 @@ impl<'a> Lexer<'a> {
 }
 
 /// Parses formula text. A leading `=` is optional.
+/// Longest formula accepted, the same limit Excel uses.
+pub const MAX_FORMULA_LEN: usize = 8192;
+/// Deepest nesting of parentheses, function calls and signs accepted. Keeps
+/// parsing and evaluation recursion far away from the stack limit.
+const MAX_DEPTH: usize = 128;
+
 pub fn parse_formula(text: &str) -> Result<Expr, ParseError> {
     let body = text.strip_prefix('=').unwrap_or(text);
+    if body.chars().count() > MAX_FORMULA_LEN {
+        return Err(ParseError {
+            message: format!("formule is langer dan {MAX_FORMULA_LEN} tekens"),
+            pos: 0,
+        });
+    }
     let tokens = Lexer { src: body, pos: 0 }.tokens()?;
-    let mut p = Parser { tokens, i: 0 };
+    let mut p = Parser { tokens, i: 0, depth: 0 };
     if p.peek() == &Tok::Eof {
         return p.err("lege formule");
     }
@@ -245,6 +257,7 @@ pub fn parse_formula(text: &str) -> Result<Expr, ParseError> {
 struct Parser {
     tokens: Vec<(Tok, usize)>,
     i: usize,
+    depth: usize,
 }
 
 const PREFIX_BP: u8 = 11;
@@ -287,7 +300,22 @@ impl Parser {
     }
 
     fn expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        if self.depth >= MAX_DEPTH {
+            return self.err("formule is te diep genest");
+        }
+        self.depth += 1;
+        let result = self.expr_inner(min_bp);
+        self.depth -= 1;
+        result
+    }
+
+    fn expr_inner(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.prefix()?;
+        // Operators of this level accumulate into one flat chain.
+        let mut chain: Vec<(BinOp, Expr)> = Vec::new();
+        let close = |lhs: Expr, chain: &mut Vec<(BinOp, Expr)>| {
+            if chain.is_empty() { lhs } else { Expr::Binary(Box::new(lhs), std::mem::take(chain)) }
+        };
         loop {
             match *self.peek() {
                 Tok::Op("%") => {
@@ -295,7 +323,7 @@ impl Parser {
                         break;
                     }
                     self.next();
-                    lhs = Expr::Percent(Box::new(lhs));
+                    lhs = Expr::Percent(Box::new(close(lhs, &mut chain)));
                 }
                 Tok::Op(op) => {
                     let Some((bin, l_bp, r_bp)) = infix(op) else { break };
@@ -304,12 +332,12 @@ impl Parser {
                     }
                     self.next();
                     let rhs = self.expr(r_bp)?;
-                    lhs = Expr::Binary(bin, Box::new(lhs), Box::new(rhs));
+                    chain.push((bin, rhs));
                 }
                 _ => break,
             }
         }
-        Ok(lhs)
+        Ok(close(lhs, &mut chain))
     }
 
     fn prefix(&mut self) -> Result<Expr, ParseError> {
@@ -512,22 +540,31 @@ mod tests {
     #[test]
     fn precedence_matches_excel() {
         use Expr::*;
+        // Higher-precedence operators nest inside the right operand.
         let e = parse_formula("=1+2*3^2").unwrap();
-        let Binary(BinOp::Add, _, rhs) = e else { panic!("{e:?}") };
-        let Binary(BinOp::Mul, _, pow) = *rhs else { panic!() };
-        assert!(matches!(*pow, Binary(BinOp::Pow, _, _)));
+        let Binary(_, rest) = &e else { panic!("{e:?}") };
+        assert_eq!(rest.len(), 1);
+        let (BinOp::Add, Binary(_, mul)) = &rest[0] else { panic!("{e:?}") };
+        let (BinOp::Mul, Binary(_, pow)) = &mul[0] else { panic!("{e:?}") };
+        assert_eq!(pow[0].0, BinOp::Pow);
 
         // Unary minus binds tighter than ^ in Excel: -2^2 = 4.
         let e = parse_formula("=-2^2").unwrap();
-        assert!(matches!(e, Binary(BinOp::Pow, ref a, _) if matches!(**a, Unary(UnaryOp::Neg, _))));
+        assert!(
+            matches!(&e, Binary(first, rest) if matches!(**first, Unary(UnaryOp::Neg, _)) && rest[0].0 == BinOp::Pow)
+        );
 
-        // Exponentiation is left-associative.
+        // Same-level operators form one left-associative chain.
         let e = parse_formula("=2^3^2").unwrap();
-        assert!(matches!(e, Binary(BinOp::Pow, ref a, _) if matches!(**a, Binary(BinOp::Pow, _, _))));
+        assert!(matches!(&e, Binary(_, rest) if rest.len() == 2));
+        let e = parse_formula("=1-2+3").unwrap();
+        assert!(matches!(&e, Binary(_, rest) if rest[0].0 == BinOp::Sub && rest[1].0 == BinOp::Add));
 
-        // Comparison is the loosest operator.
+        // Comparison is the loosest operator: it never ends up inside an operand.
         let e = parse_formula("=A1&\"x\"=B1").unwrap();
-        assert!(matches!(e, Binary(BinOp::Eq, _, _)));
+        assert!(matches!(&e, Binary(_, rest) if rest[0].0 == BinOp::Concat && rest[1].0 == BinOp::Eq));
+        let e = parse_formula("=1=2&3").unwrap();
+        assert!(matches!(&e, Binary(_, rest) if rest.len() == 1 && rest[0].0 == BinOp::Eq));
     }
 
     #[test]
@@ -536,6 +573,17 @@ mod tests {
         assert!(matches!(parse_formula("=XFD1").unwrap(), Expr::Ref { .. }));
         // Beyond the last column it is a name, not a reference.
         assert!(matches!(parse_formula("=XFE1").unwrap(), Expr::Name(_)));
+    }
+
+    #[test]
+    fn rejects_hostile_input_without_panicking() {
+        assert!(parse_formula("=#é").is_err());
+        assert!(parse_formula("=#DIV/é").is_err());
+        assert!(parse_formula(&format!("={}1{}", "(".repeat(10_000), ")".repeat(10_000))).is_err());
+        assert!(parse_formula(&format!("={}1", "-".repeat(10_000))).is_err());
+        assert!(parse_formula(&format!("=SUM({}", "SUM(".repeat(5_000))).is_err());
+        assert!(parse_formula(&format!("={}", "1+".repeat(5_000))).is_err());
+        assert!(parse_formula(&format!("={}", "(1)+".repeat(100) + "1")).is_ok());
     }
 
     #[test]

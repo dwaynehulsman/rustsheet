@@ -101,15 +101,19 @@ impl Eval<'_> {
                 Ok(n) => Value::number(n / 100.0),
                 Err(err) => Value::Error(err),
             },
-            Expr::Binary(op, a, b) => self.binary(*op, a, b).unwrap_or_else(Value::Error),
+            Expr::Binary(first, rest) => {
+                let mut acc = self.scalar(first);
+                for (op, rhs) in rest {
+                    acc = self.binary(*op, acc, self.scalar(rhs)).unwrap_or_else(Value::Error);
+                }
+                acc
+            }
             Expr::Call(name, args) => self.call(name, args).unwrap_or_else(Value::Error),
             Expr::Name(_) => Value::Error(ErrorKind::Name),
         }
     }
 
-    fn binary(&self, op: BinOp, a: &Expr, b: &Expr) -> Res<Value> {
-        let a = self.scalar(a);
-        let b = self.scalar(b);
+    fn binary(&self, op: BinOp, a: Value, b: Value) -> Res<Value> {
         if let Value::Error(e) = a {
             return Err(e);
         }
