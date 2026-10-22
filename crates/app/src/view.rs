@@ -87,6 +87,16 @@ pub struct FindBar {
     pub info: String,
 }
 
+/// The open value list of a filter button.
+pub struct FilterPopup {
+    pub col: u32,
+    /// Displayed values and whether they stay visible.
+    pub items: Vec<(String, bool)>,
+    pub anchor: egui::Pos2,
+    /// Opened by this frame's click, which must not count as clicking outside.
+    pub fresh: bool,
+}
+
 /// A sheet tab being renamed in place.
 pub struct Rename {
     pub sheet: SheetId,
@@ -115,6 +125,7 @@ pub struct SheetView {
     sheet_views: HashMap<SheetId, (Selection, (f64, f64))>,
     pub rename: Option<Rename>,
     pub find: Option<FindBar>,
+    pub filter_popup: Option<FilterPopup>,
     /// Column where a run of Tab presses started; Enter returns there on
     /// the next row, like Excel.
     tab_start: Option<u32>,
@@ -148,6 +159,7 @@ impl SheetView {
             sheet_views: HashMap::new(),
             rename: None,
             find: None,
+            filter_popup: None,
             tab_start: None,
             sel: Selection::single(CellRef::default()),
             scroll: (0.0, 0.0),
@@ -387,6 +399,27 @@ impl SheetView {
             }
             Command::Delete => self.clear_selection(),
             Command::SortAsc | Command::SortDesc => self.sort(command == Command::SortDesc),
+            Command::ToggleFilter => {
+                if self.sheet().filter().is_some() {
+                    self.doc.set_filter(self.sheet, None);
+                    self.status = Some("Filter uit".into());
+                } else {
+                    let sel = self.sel.range();
+                    let range = if sel.len() == 1 {
+                        rustsheet_core::sort::current_region(self.sheet(), self.sel.active)
+                    } else {
+                        sel
+                    };
+                    if range.rows() < 2 {
+                        self.status =
+                            Some("Kies een tabel met een kop en minstens één rij om te filteren.".into());
+                    } else {
+                        self.doc.set_filter(self.sheet, Some(rustsheet_core::filter::AutoFilter::new(range)));
+                        self.status = Some("Filter aan: kies waarden met de knopjes in de kop".into());
+                    }
+                }
+                self.filter_popup = None;
+            }
             Command::FreezeTopRow
             | Command::FreezeFirstCol
             | Command::FreezeAtSelection
@@ -682,6 +715,97 @@ impl SheetView {
         self.sel = Selection { active: self.sel.active, anchor: range.start, corner: range.end };
         self.status =
             Some(if header { "Gesorteerd (eerste rij is kop)".into() } else { "Gesorteerd".into() });
+    }
+
+    /// Opens the value list of the filter button in column `col`.
+    pub fn open_filter_popup(&mut self, col: u32, anchor: egui::Pos2) {
+        let Some(filter) = self.sheet().filter() else { return };
+        let allowed = filter.criteria.get(&col);
+        let items = filter
+            .values(self.sheet(), col)
+            .into_iter()
+            .map(|v| {
+                let on = allowed.is_none_or(|a| a.contains(&v));
+                (v, on)
+            })
+            .collect();
+        self.filter_popup = Some(FilterPopup { col, items, anchor, fresh: true });
+    }
+
+    /// Applies the checked values of the open filter list.
+    pub fn apply_filter_popup(&mut self) {
+        let Some(popup) = self.filter_popup.take() else { return };
+        let Some(mut filter) = self.sheet().filter().cloned() else { return };
+        if popup.items.iter().all(|(_, on)| *on) {
+            filter.criteria.remove(&popup.col);
+        } else {
+            filter
+                .criteria
+                .insert(popup.col, popup.items.into_iter().filter(|(_, on)| *on).map(|(v, _)| v).collect());
+        }
+        self.doc.set_filter(self.sheet, Some(filter));
+    }
+
+    /// Sorts the filtered table by a column and filters again.
+    pub fn sort_filter_column(&mut self, col: u32, descending: bool) {
+        self.filter_popup = None;
+        let Some(filter) = self.sheet().filter().cloned() else { return };
+        let changes = rustsheet_core::sort::sort_rows(self.sheet(), filter.range, col, descending, true);
+        self.doc.set_cells(self.sheet, changes, Some(filter.range));
+        self.doc.set_filter(self.sheet, Some(filter));
+    }
+
+    /// The filter value list, when open. Called after the grid is drawn.
+    pub fn filter_popup_ui(&mut self, ui: &mut Ui, window: u64) {
+        let Some(popup) = &mut self.filter_popup else { return };
+        let mut action: Option<&str> = None;
+        let area = egui::Area::new(egui::Id::unique(("filter-popup", window)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(popup.anchor)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    if ui.button("Sorteer A tot Z").clicked() {
+                        action = Some("asc");
+                    }
+                    if ui.button("Sorteer Z tot A").clicked() {
+                        action = Some("desc");
+                    }
+                    ui.separator();
+                    let mut all = popup.items.iter().all(|(_, on)| *on);
+                    if ui.checkbox(&mut all, "(Alles selecteren)").changed() {
+                        popup.items.iter_mut().for_each(|(_, on)| *on = all);
+                    }
+                    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                        for (value, on) in &mut popup.items {
+                            let label = if value.is_empty() { "(Leeg)".to_string() } else { value.clone() };
+                            ui.checkbox(on, label);
+                        }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            action = Some("ok");
+                        }
+                        if ui.button("Annuleer").clicked() {
+                            action = Some("cancel");
+                        }
+                    });
+                });
+            });
+        let clicked_outside =
+            !popup.fresh && ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer();
+        popup.fresh = false;
+        let escape = ui.input(|i| i.key_pressed(Key::Escape));
+        let col = popup.col;
+        match action {
+            Some("ok") => self.apply_filter_popup(),
+            Some("asc") => self.sort_filter_column(col, false),
+            Some("desc") => self.sort_filter_column(col, true),
+            Some("cancel") => self.filter_popup = None,
+            _ if escape || clicked_outside => self.filter_popup = None,
+            _ => {}
+        }
     }
 
     /// Selects the next (or previous) match of the find bar's query.

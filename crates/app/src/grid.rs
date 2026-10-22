@@ -144,6 +144,8 @@ impl Geometry {
 
 enum Zone {
     Corner,
+    /// The value-list button of an autofilter header cell.
+    FilterButton(u32, Rect),
     /// The small square at the bottom right of the selection.
     FillHandle,
     ColBorder(u32),
@@ -425,7 +427,34 @@ impl SheetView {
         if self.fill_handle(g).is_some_and(|h| h.expand(3.0).contains(pos)) {
             return Some(Zone::FillHandle);
         }
+        if let Some((col, rect)) = self.filter_buttons(g).into_iter().find(|(_, r)| r.contains(pos)) {
+            return Some(Zone::FilterButton(col, rect));
+        }
         g.cells.contains(pos).then(|| Zone::Cell(self.cell_at(g, pos)))
+    }
+
+    /// The filter buttons visible in the header row of the autofilter.
+    fn filter_buttons(&self, g: &Geometry) -> Vec<(u32, Rect)> {
+        let Some(f) = self.sheet().filter() else { return Vec::new() };
+        let header = f.range.start.row;
+        let Some(&(_, y, h)) = g.rows.iter().find(|r| r.0 == header) else { return Vec::new() };
+        g.cols
+            .iter()
+            .filter(|(col, _, _)| (f.range.start.col..=f.range.end.col).contains(col))
+            .map(|&(col, x, w)| {
+                let size = (h - 6.0).clamp(10.0, 16.0);
+                let rect =
+                    Rect::from_min_size(pos2(x + w - size - 3.0, y + (h - size) / 2.0), vec2(size, size));
+                (col, rect)
+            })
+            .collect()
+    }
+
+    /// Screen centre of a filter button as laid out last frame.
+    #[cfg(test)]
+    pub fn filter_button_center(&self, col: u32) -> Option<Pos2> {
+        let g = self.geometry(self.grid_rect);
+        self.filter_buttons(&g).into_iter().find(|(c, _)| *c == col).map(|(_, r)| r.center())
     }
 
     /// Where the fill handle is drawn, when the selection's corner is visible.
@@ -528,6 +557,7 @@ impl SheetView {
         let palette = Palette::new(ui.visuals().dark_mode);
         self.paint(ui, &g, &palette, env);
         self.editor(ui, &g, &palette, editor_id, bar_id);
+        self.filter_popup_ui(ui, env.window);
     }
 
     fn keyboard(&mut self, ui: &mut Ui, env: &mut Env<'_>) {
@@ -807,6 +837,7 @@ impl SheetView {
                 env.clip.cut();
             }
             Zone::FillHandle => self.drag = Drag::Fill { target: None },
+            Zone::FilterButton(col, rect) => self.open_filter_popup(col, rect.left_bottom() + vec2(0.0, 2.0)),
             Zone::VBar | Zone::HBar => {
                 let vertical = matches!(zone, Zone::VBar);
                 let (thumb, range) = self.thumb(g, vertical);
@@ -1067,6 +1098,19 @@ impl SheetView {
                 }
                 let pos = pos2(tx, y + (h - galley.size().y) / 2.0);
                 cells_painter.with_clip_rect(clip.intersect(band)).galley(pos, galley, text_color);
+            }
+        }
+
+        // Autofilter buttons in the header row.
+        if let Some(f) = sheet.filter() {
+            for (col, rect) in self.filter_buttons(g) {
+                let on = f.is_filtered(col);
+                let fill = if on { p.accent } else { p.header_bg };
+                let bp = cells_painter.with_clip_rect(g.band(f.range.start.row, col));
+                bp.rect_filled(rect, 3.0, fill);
+                bp.rect_stroke(rect, 3.0, Stroke::new(1.0, p.header_line), StrokeKind::Inside);
+                let color = if on { Color32::WHITE } else { p.header_text };
+                bp.text(rect.center(), Align2::CENTER_CENTER, "▾", FontId::proportional(11.0), color);
             }
         }
 

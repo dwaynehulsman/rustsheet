@@ -668,3 +668,46 @@ fn dragging_a_row_border_changes_its_height() {
     command(&mut h, Command::Undo);
     assert_eq!(h.state().view.sheet().custom_row_height(0), None);
 }
+
+#[test]
+fn autofilter_hides_rows_by_value() {
+    let mut h = harness();
+    for row in [["Naam", "Stad"], ["Anna", "Utrecht"], ["Bram", "Delft"], ["Cem", "Utrecht"]] {
+        text(&mut h, row[0]);
+        key(&mut h, Key::Tab);
+        text(&mut h, row[1]);
+        key(&mut h, Key::Enter);
+    }
+    click(&mut h, "A1", Modifiers::NONE);
+    command(&mut h, Command::ToggleFilter);
+    assert_eq!(h.state().view.sheet().filter().map(|f| f.range.to_string()), Some("A1:B4".into()));
+
+    let button = h.state().view.filter_button_center(1).expect("filter button on B1");
+    h.hover_at(button);
+    h.event(Event::PointerButton {
+        pos: button,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    h.event(Event::PointerButton {
+        pos: button,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run();
+    assert!(h.state().view.filter_popup.is_some());
+    h.get_by_label("Delft").click();
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    let sheet = h.state().view.sheet();
+    assert!(sheet.is_row_hidden(2) && !sheet.is_row_hidden(1) && !sheet.is_row_hidden(3));
+    assert!(sheet.filter().unwrap().is_filtered(1));
+
+    command(&mut h, Command::Undo);
+    assert!(!h.state().view.sheet().is_row_hidden(2));
+    command(&mut h, Command::ToggleFilter);
+    assert!(h.state().view.sheet().filter().is_none());
+}

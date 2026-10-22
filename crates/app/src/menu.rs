@@ -47,6 +47,7 @@ pub enum Command {
     FillRight,
     SortAsc,
     SortDesc,
+    ToggleFilter,
     FreezeTopRow,
     FreezeFirstCol,
     FreezeAtSelection,
@@ -95,6 +96,7 @@ impl Command {
             Command::FillRight => "fill-right".into(),
             Command::SortAsc => "sort-asc".into(),
             Command::SortDesc => "sort-desc".into(),
+            Command::ToggleFilter => "filter".into(),
             Command::FreezeTopRow => "freeze-row".into(),
             Command::FreezeFirstCol => "freeze-col".into(),
             Command::FreezeAtSelection => "freeze-here".into(),
@@ -145,6 +147,7 @@ impl Command {
             Command::FillRight,
             Command::SortAsc,
             Command::SortDesc,
+            Command::ToggleFilter,
             Command::FreezeTopRow,
             Command::FreezeFirstCol,
             Command::FreezeAtSelection,
@@ -307,6 +310,8 @@ impl AppMenu {
             &[
                 &item("Sorteer oplopend (A tot Z)", Command::SortAsc, None),
                 &item("Sorteer aflopend (Z tot A)", Command::SortDesc, None),
+                &PredefinedMenuItem::separator(),
+                &item("Filter", Command::ToggleFilter, Some("Shift+CmdOrCtrl+KeyL")),
             ],
         )
         .expect("data menu");
