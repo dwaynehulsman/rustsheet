@@ -10,6 +10,7 @@ use rustsheet_core::sheet::{DEFAULT_COL_WIDTH, MIN_COL_WIDTH};
 use rustsheet_core::{CellRef, MAX_COLS, MAX_ROWS, Range, Value, addr::col_name};
 
 use crate::fonts::bold_family;
+use crate::menu::Command;
 use crate::view::{Env, Selection, SheetView, take_edit_keys, take_key};
 
 pub const ROW_H: f32 = 22.0;
@@ -349,6 +350,8 @@ impl SheetView {
         self.pointer(ui, &response, &g, env);
         g = self.geometry(rect);
 
+        self.context_menu(&response);
+
         let palette = Palette::new(ui.visuals().dark_mode);
         self.paint(ui, &g, &palette, env);
         self.editor(ui, &g, &palette, editor_id, bar_id);
@@ -422,6 +425,37 @@ impl SheetView {
             _ => {}
         }
 
+        // Right-click outside the selection selects what was clicked first.
+        let secondary = ui.input(|i| i.pointer.secondary_pressed());
+        if secondary && response.contains_pointer() && self.edit.is_none() {
+            let sel = self.sel.range();
+            match zone {
+                Some(Zone::Cell(at)) if !sel.contains(at) => self.select(at, false),
+                Some(Zone::ColHeader(col))
+                    if !(sel.start.col..=sel.end.col).contains(&col) || sel.rows() < MAX_ROWS =>
+                {
+                    let top = g.rows.first().map_or(0, |r| r.0);
+                    self.sel = Selection {
+                        active: CellRef::new(top, col),
+                        anchor: CellRef::new(0, col),
+                        corner: CellRef::new(MAX_ROWS - 1, col),
+                    };
+                }
+                Some(Zone::RowHeader(row))
+                    if !(sel.start.row..=sel.end.row).contains(&row) || sel.cols() < MAX_COLS =>
+                {
+                    let left = g.cols.first().map_or(0, |c| c.0);
+                    self.sel = Selection {
+                        active: CellRef::new(row, left),
+                        anchor: CellRef::new(row, 0),
+                        corner: CellRef::new(row, MAX_COLS - 1),
+                    };
+                }
+                _ => {}
+            }
+            self.scroll_into_view = false;
+        }
+
         if pressed && response.contains_pointer() {
             self.press(ui, zone, pos, shift, g, env);
         } else if down && self.drag != Drag::None {
@@ -449,6 +483,46 @@ impl SheetView {
                 Some(Zone::ColBorder(col)) => self.autofit(col),
                 _ => {}
             }
+        }
+    }
+
+    /// Right-click menu: clipboard, inserting and deleting rows and columns.
+    fn context_menu(&mut self, response: &egui::Response) {
+        let (row_at, rows) = self.line_span(true, true);
+        let (col_at, cols) = self.line_span(false, true);
+        let (_, del_rows) = self.line_span(true, false);
+        let (_, del_cols) = self.line_span(false, false);
+        let plural =
+            |n: u32, one: &str, many: &str| if n == 1 { one.to_string() } else { format!("{n} {many}") };
+        let mut chosen = None;
+        response.context_menu(|ui| {
+            let mut entry = |ui: &mut Ui, label: String, command: Command| {
+                if ui.button(label).clicked() {
+                    chosen = Some(command);
+                    ui.close();
+                }
+            };
+            entry(ui, "Knip".into(), Command::Cut);
+            entry(ui, "Kopieer".into(), Command::Copy);
+            entry(ui, "Plak".into(), Command::Paste);
+            ui.separator();
+            entry(
+                ui,
+                format!("Voeg {} in boven rij {}", plural(rows, "rij", "rijen"), row_at + 1),
+                Command::InsertRows,
+            );
+            entry(
+                ui,
+                format!("Voeg {} in links van {}", plural(cols, "kolom", "kolommen"), col_name(col_at)),
+                Command::InsertCols,
+            );
+            entry(ui, format!("Verwijder {}", plural(del_rows, "rij", "rijen")), Command::DeleteRows);
+            entry(ui, format!("Verwijder {}", plural(del_cols, "kolom", "kolommen")), Command::DeleteCols);
+            ui.separator();
+            entry(ui, "Wis inhoud".into(), Command::Delete);
+        });
+        if let Some(command) = chosen {
+            self.push_command(command);
         }
     }
 

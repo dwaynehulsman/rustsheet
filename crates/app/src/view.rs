@@ -362,6 +362,9 @@ impl SheetView {
                 self.sel = Selection::span(CellRef::default(), CellRef::new(MAX_ROWS - 1, MAX_COLS - 1));
             }
             Command::Delete => self.clear_selection(),
+            Command::InsertRows | Command::InsertCols | Command::DeleteRows | Command::DeleteCols => {
+                self.change_lines(command)
+            }
             Command::Bold => {
                 let bold = !self.sheet().format(self.sel.active).bold;
                 self.format_selection(|f| f.bold = bold);
@@ -576,6 +579,36 @@ impl SheetView {
             })
             .collect();
         self.doc.set_cells(self.sheet, changes, Some(self.sel.range()));
+    }
+
+    /// Rows (or columns) the selection covers; a selection spanning every
+    /// row (a whole column) counts as one row when inserting.
+    pub fn line_span(&self, rows: bool, inserting: bool) -> (u32, u32) {
+        let r = self.sel.range();
+        let (start, len, max) =
+            if rows { (r.start.row, r.rows(), MAX_ROWS) } else { (r.start.col, r.cols(), MAX_COLS) };
+        (start, if inserting && len == max { 1 } else { len })
+    }
+
+    fn change_lines(&mut self, command: Command) {
+        let rows = matches!(command, Command::InsertRows | Command::DeleteRows);
+        let inserting = matches!(command, Command::InsertRows | Command::InsertCols);
+        let (at, count) = self.line_span(rows, inserting);
+        let result = if inserting {
+            self.doc.insert_lines(self.sheet, rows, at, count)
+        } else {
+            self.doc.delete_lines(self.sheet, rows, at, count)
+        };
+        match result {
+            Ok(()) => {
+                if !inserting {
+                    let a = self.sel.range().start;
+                    self.sel = Selection::single(a);
+                }
+                self.status = None;
+            }
+            Err(e) => self.status = Some(e),
+        }
     }
 
     fn clear_selection(&mut self) {

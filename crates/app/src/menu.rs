@@ -35,6 +35,10 @@ pub enum Command {
     DeleteSheet,
     NextSheet,
     PrevSheet,
+    InsertRows,
+    InsertCols,
+    DeleteRows,
+    DeleteCols,
 }
 
 impl Command {
@@ -64,6 +68,10 @@ impl Command {
             Command::DeleteSheet => "delete-sheet".into(),
             Command::NextSheet => "next-sheet".into(),
             Command::PrevSheet => "prev-sheet".into(),
+            Command::InsertRows => "insert-rows".into(),
+            Command::InsertCols => "insert-cols".into(),
+            Command::DeleteRows => "delete-rows".into(),
+            Command::DeleteCols => "delete-cols".into(),
         }
     }
 
@@ -97,6 +105,10 @@ impl Command {
             Command::DeleteSheet,
             Command::NextSheet,
             Command::PrevSheet,
+            Command::InsertRows,
+            Command::InsertCols,
+            Command::DeleteRows,
+            Command::DeleteCols,
         ];
         all.into_iter().chain(NumFmt::ALL.into_iter().map(Command::NumFmt)).find(|c| c.id() == id)
     }
@@ -175,6 +187,11 @@ impl AppMenu {
                 &item("Plak", Command::Paste, Some("CmdOrCtrl+V")),
                 &item("Wis", Command::Delete, None),
                 &item("Selecteer alles", Command::SelectAll, Some("CmdOrCtrl+A")),
+                &PredefinedMenuItem::separator(),
+                &item("Voeg rijen in", Command::InsertRows, Some("CmdOrCtrl+Shift+Equal")),
+                &item("Voeg kolommen in", Command::InsertCols, None),
+                &item("Verwijder rijen", Command::DeleteRows, Some("CmdOrCtrl+Minus")),
+                &item("Verwijder kolommen", Command::DeleteCols, None),
             ],
         )
         .expect("edit menu");

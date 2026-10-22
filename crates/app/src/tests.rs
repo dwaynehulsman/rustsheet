@@ -415,3 +415,57 @@ fn tab_context_menu_duplicates_and_deletes() {
     assert_eq!(sheet_names(&h), ["Blad1", "Blad1 (2)"]);
     assert_eq!(current_sheet(&h), "Blad1 (2)");
 }
+
+fn right_click(h: &mut Harness<'_, State>, at: &str) {
+    let pos = h.state().view.cell_center(c(at));
+    h.hover_at(pos);
+    h.event(Event::PointerButton {
+        pos,
+        button: PointerButton::Secondary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    h.event(Event::PointerButton {
+        pos,
+        button: PointerButton::Secondary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run();
+}
+
+#[test]
+fn context_menu_inserts_and_deletes_rows_and_columns() {
+    let mut h = harness();
+    for v in ["1", "2", "3"] {
+        text(&mut h, v);
+        key(&mut h, Key::Enter);
+    }
+    text(&mut h, "=SUM(A1:A3)");
+    key(&mut h, Key::Enter);
+
+    right_click(&mut h, "A2");
+    assert_eq!(h.state().view.sel.active, c("A2"));
+    h.get_by_label("Voeg rij in boven rij 2").click();
+    h.run();
+    assert_eq!(h.state().view.sheet().state(c("A5")).content.source(), "=SUM(A1:A4)");
+    assert_eq!(shown(&h, "A3"), "2");
+
+    // Two selected rows delete together.
+    click(&mut h, "A2", Modifiers::NONE);
+    click(&mut h, "A3", Modifiers::SHIFT);
+    right_click(&mut h, "A3");
+    h.get_by_label("Verwijder 2 rijen").click();
+    h.run();
+    assert_eq!(h.state().view.sheet().state(c("A3")).content.source(), "=SUM(A1:A2)");
+    assert_eq!(shown(&h, "A3"), "4");
+
+    // Menu commands for columns, and undo.
+    command(&mut h, Command::InsertCols);
+    assert_eq!(h.state().view.sheet().state(c("B3")).content.source(), "=SUM(B1:B2)");
+    command(&mut h, Command::Undo);
+    command(&mut h, Command::Undo);
+    command(&mut h, Command::Undo);
+    assert_eq!(h.state().view.sheet().state(c("A4")).content.source(), "=SUM(A1:A3)");
+    assert_eq!(shown(&h, "A4"), "6");
+}
