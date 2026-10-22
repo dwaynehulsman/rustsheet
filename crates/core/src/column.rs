@@ -1,29 +1,114 @@
 //! Storage for one column: rows split into fixed-size pages held in a
 //! vector, so finding a cell is two array lookups and walking a range skips
-//! pages that hold nothing.
+//! pages that hold nothing. Pages with few cells stay small sorted lists.
 
 use crate::sheet::Cell;
 
 const PAGE_BITS: u32 = 6;
 const PAGE: usize = 1 << PAGE_BITS;
 const MASK: u32 = PAGE as u32 - 1;
+/// A page switches from a short sorted list to a full array beyond this
+/// many cells, so scattered cells cost about their own size, not a page each.
+const SPARSE_MAX: usize = 8;
 
 #[derive(Debug)]
-struct Page {
-    cells: [Option<Cell>; PAGE],
-    count: u32,
+enum Page {
+    /// Up to [`SPARSE_MAX`] cells as (slot, cell), sorted by slot.
+    Sparse(Vec<(u8, Cell)>),
+    Dense(Box<[Option<Cell>; PAGE]>, u32),
 }
 
 impl Page {
-    fn new() -> Box<Page> {
-        Box::new(Page { cells: std::array::from_fn(|_| None), count: 0 })
+    fn len(&self) -> usize {
+        match self {
+            Page::Sparse(v) => v.len(),
+            Page::Dense(_, n) => *n as usize,
+        }
+    }
+
+    fn get(&self, slot: u8) -> Option<&Cell> {
+        match self {
+            Page::Sparse(v) => v.binary_search_by_key(&slot, |(s, _)| *s).ok().map(|i| &v[i].1),
+            Page::Dense(cells, _) => cells[slot as usize].as_ref(),
+        }
+    }
+
+    fn get_mut(&mut self, slot: u8) -> Option<&mut Cell> {
+        match self {
+            Page::Sparse(v) => v.binary_search_by_key(&slot, |(s, _)| *s).ok().map(|i| &mut v[i].1),
+            Page::Dense(cells, _) => cells[slot as usize].as_mut(),
+        }
+    }
+
+    /// Stores a cell; returns true when the slot was empty.
+    fn insert(&mut self, slot: u8, cell: Cell) -> bool {
+        match self {
+            Page::Sparse(v) => match v.binary_search_by_key(&slot, |(s, _)| *s) {
+                Ok(i) => {
+                    v[i].1 = cell;
+                    false
+                }
+                Err(i) if v.len() < SPARSE_MAX => {
+                    v.insert(i, (slot, cell));
+                    true
+                }
+                Err(_) => {
+                    let mut cells: Box<[Option<Cell>; PAGE]> = Box::new(std::array::from_fn(|_| None));
+                    let n = v.len() as u32 + 1;
+                    for (s, c) in v.drain(..) {
+                        cells[s as usize] = Some(c);
+                    }
+                    cells[slot as usize] = Some(cell);
+                    *self = Page::Dense(cells, n);
+                    true
+                }
+            },
+            Page::Dense(cells, n) => {
+                let was_empty = cells[slot as usize].is_none();
+                cells[slot as usize] = Some(cell);
+                *n += u32::from(was_empty);
+                was_empty
+            }
+        }
+    }
+
+    /// Removes a cell; returns true when there was one.
+    fn remove(&mut self, slot: u8) -> bool {
+        match self {
+            Page::Sparse(v) => match v.binary_search_by_key(&slot, |(s, _)| *s) {
+                Ok(i) => {
+                    v.remove(i);
+                    true
+                }
+                Err(_) => false,
+            },
+            Page::Dense(cells, n) => {
+                let had = cells[slot as usize].take().is_some();
+                *n -= u32::from(had);
+                had
+            }
+        }
+    }
+
+    /// Cells in slot order.
+    fn iter(&self) -> Box<dyn Iterator<Item = (u8, &Cell)> + '_> {
+        match self {
+            Page::Sparse(v) => Box::new(v.iter().map(|(s, c)| (*s, c))),
+            Page::Dense(cells, _) => {
+                Box::new(cells.iter().enumerate().filter_map(|(i, c)| c.as_ref().map(|c| (i as u8, c))))
+            }
+        }
     }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct Column {
-    pages: Vec<Option<Box<Page>>>,
+    pages: Vec<Option<Page>>,
     len: usize,
+}
+
+fn split(row: u32) -> (usize, u8) {
+    ((row >> PAGE_BITS) as usize, (row & MASK) as u8)
 }
 
 impl Column {
@@ -32,34 +117,32 @@ impl Column {
     }
 
     pub fn get(&self, row: u32) -> Option<&Cell> {
-        self.pages.get((row >> PAGE_BITS) as usize)?.as_ref()?.cells[(row & MASK) as usize].as_ref()
+        let (p, slot) = split(row);
+        self.pages.get(p)?.as_ref()?.get(slot)
     }
 
     pub fn get_mut(&mut self, row: u32) -> Option<&mut Cell> {
-        self.pages.get_mut((row >> PAGE_BITS) as usize)?.as_mut()?.cells[(row & MASK) as usize].as_mut()
+        let (p, slot) = split(row);
+        self.pages.get_mut(p)?.as_mut()?.get_mut(slot)
     }
 
     pub fn insert(&mut self, row: u32, cell: Cell) {
-        let p = (row >> PAGE_BITS) as usize;
+        let (p, slot) = split(row);
         if self.pages.len() <= p {
             self.pages.resize_with(p + 1, || None);
         }
-        let page = self.pages[p].get_or_insert_with(Page::new);
-        let slot = &mut page.cells[(row & MASK) as usize];
-        if slot.is_none() {
-            page.count += 1;
+        let page = self.pages[p].get_or_insert_with(|| Page::Sparse(Vec::new()));
+        if page.insert(slot, cell) {
             self.len += 1;
         }
-        *slot = Some(cell);
     }
 
     pub fn remove(&mut self, row: u32) {
-        let p = (row >> PAGE_BITS) as usize;
+        let (p, slot) = split(row);
         let Some(Some(page)) = self.pages.get_mut(p) else { return };
-        if page.cells[(row & MASK) as usize].take().is_some() {
-            page.count -= 1;
+        if page.remove(slot) {
             self.len -= 1;
-            if page.count == 0 {
+            if page.len() == 0 {
                 self.pages[p] = None;
                 while self.pages.last().is_some_and(Option::is_none) {
                     self.pages.pop();
@@ -76,9 +159,9 @@ impl Column {
         pages.iter().enumerate().filter_map(move |(i, page)| Some((first + i, page.as_ref()?))).flat_map(
             move |(p, page)| {
                 let base = (p as u32) << PAGE_BITS;
-                page.cells.iter().enumerate().filter_map(move |(i, cell)| {
-                    let row = base + i as u32;
-                    if row < from || row > to { None } else { cell.as_ref().map(|c| (row, c)) }
+                page.iter().filter_map(move |(slot, cell)| {
+                    let row = base + u32::from(slot);
+                    (from..=to).contains(&row).then_some((row, cell))
                 })
             },
         )
@@ -94,8 +177,8 @@ impl Column {
 
     pub fn last_row(&self) -> Option<u32> {
         let (p, page) = self.pages.iter().enumerate().rev().find_map(|(i, p)| Some((i, p.as_ref()?)))?;
-        let slot = page.cells.iter().rposition(Option::is_some)?;
-        Some(((p as u32) << PAGE_BITS) + slot as u32)
+        let slot = page.iter().last()?.0;
+        Some(((p as u32) << PAGE_BITS) + u32::from(slot))
     }
 }
 
@@ -105,6 +188,31 @@ mod tests {
 
     fn cell(n: f64) -> Cell {
         Cell { value: crate::value::Value::Number(n), ..Cell::default() }
+    }
+
+    #[test]
+    fn pages_grow_from_sparse_to_dense_and_back() {
+        let mut col = Column::default();
+        for row in (0..64).rev() {
+            col.insert(row, cell(f64::from(row)));
+            assert_eq!(
+                col.get(row).map(|c| c.value.clone()),
+                Some(crate::value::Value::Number(f64::from(row)))
+            );
+        }
+        assert!(matches!(col.pages[0], Some(Page::Dense(_, 64))));
+        let rows: Vec<u32> = col.iter().map(|(r, _)| r).collect();
+        assert_eq!(rows, (0..64).collect::<Vec<_>>());
+        for row in 0..64 {
+            col.remove(row);
+        }
+        assert!(col.pages.is_empty());
+
+        // Scattered cells stay sparse: one small list per page.
+        for row in (0..64 * 100).step_by(64) {
+            col.insert(row, cell(1.0));
+        }
+        assert!(col.pages.iter().all(|p| matches!(p, Some(Page::Sparse(v)) if v.len() == 1)));
     }
 
     #[test]
