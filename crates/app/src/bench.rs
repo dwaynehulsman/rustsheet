@@ -135,6 +135,8 @@ impl Bench {
 pub struct Shot {
     pub path: PathBuf,
     pub after_frames: u32,
+    /// Do not capture before this moment (`--screenshot-wait`).
+    pub not_before: Option<Instant>,
     pub quit: bool,
     seen: u32,
     requested: bool,
@@ -143,7 +145,15 @@ pub struct Shot {
 
 impl Shot {
     pub fn new(path: PathBuf, quit: bool) -> Self {
-        Self { path, after_frames: 30, quit, seen: 0, requested: false, done: Default::default() }
+        Self {
+            path,
+            after_frames: 30,
+            not_before: None,
+            quit,
+            seen: 0,
+            requested: false,
+            done: Default::default(),
+        }
     }
 
     /// Call once per frame; returns true when the app may quit. Frames are
@@ -152,7 +162,8 @@ impl Shot {
         if ready {
             self.seen += 1;
         }
-        if !self.requested && self.seen >= self.after_frames {
+        let waited = self.not_before.is_none_or(|t| Instant::now() >= t);
+        if !self.requested && self.seen >= self.after_frames && waited {
             self.requested = true;
             let path = self.path.clone();
             let done = self.done.clone();

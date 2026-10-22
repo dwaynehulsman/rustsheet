@@ -6,6 +6,7 @@ mod clip;
 mod fonts;
 mod grid;
 mod menu;
+mod open_files;
 mod recent;
 #[cfg(test)]
 mod tests;
@@ -22,6 +23,7 @@ fn main() -> eframe::Result {
     let mut shot = None;
     let mut select = None;
     let mut sheet = None;
+    let mut screenshot_wait = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -35,11 +37,19 @@ fn main() -> eframe::Result {
                 shot = args.next().map(|p| bench::Shot::new(PathBuf::from(p), true))
             }
             Some("--select") => select = args.next().and_then(|s| s.into_string().ok()),
+            Some("--screenshot-wait") => {
+                let secs: f64 =
+                    args.next().and_then(|s| s.to_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+                screenshot_wait = Some(std::time::Duration::from_secs_f64(secs.max(0.0)));
+            }
             Some("--sheet") => sheet = args.next().and_then(|s| s.into_string().ok()),
             // Finder passes a process serial number on older systems.
             Some(s) if s.starts_with("-psn_") => {}
             _ => files.push(PathBuf::from(arg)),
         }
+    }
+    if let (Some(shot), Some(wait)) = (&mut shot, screenshot_wait) {
+        shot.not_before = Some(started + wait);
     }
     let bench = bench_frames.map(|n| bench::Bench::new(started, n, bench_out));
 
@@ -52,9 +62,18 @@ fn main() -> eframe::Result {
         centered: true,
         ..Default::default()
     };
-    eframe::run_native(
+    // Own the event loop (instead of eframe::run_native) so the app delegate
+    // can be installed between creating it and running it; that is the only
+    // moment that catches the files Finder asks a fresh launch to open.
+    let event_loop = winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event()
+        .build()
+        .map_err(eframe::Error::WinitEventLoop)?;
+    open_files::install();
+    let mut app = eframe::create_native(
         "Rustsheet",
         options,
         Box::new(move |cc| Ok(Box::new(app::RustsheetApp::new(cc, files, bench, shot, select, sheet)))),
-    )
+        &event_loop,
+    );
+    event_loop.run_app(&mut app).map_err(eframe::Error::WinitEventLoop)
 }

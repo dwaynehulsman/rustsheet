@@ -73,6 +73,7 @@ impl RustsheetApp {
         sheet: Option<String>,
     ) -> Self {
         crate::fonts::install(&cc.egui_ctx);
+        crate::open_files::set_context(&cc.egui_ctx);
         cc.egui_ctx.options_mut(|o| o.input_options.line_scroll_speed = 44.0);
         let ctx = cc.egui_ctx.clone();
         let menu = AppMenu::install(move || ctx.request_repaint());
@@ -388,6 +389,9 @@ impl eframe::App for RustsheetApp {
             for command in menu.poll() {
                 self.command(command, &ctx);
             }
+        }
+        for path in crate::open_files::take() {
+            self.open_path(&path, &ctx);
         }
         self.finish_loads();
         match self.loading.first() {

@@ -52,6 +52,41 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSHumanReadableCopyright</key><string>© Infodatek</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Excel-werkmap</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array><string>org.openxmlformats.spreadsheetml.sheet</string></array>
+      <key>CFBundleTypeExtensions</key><array><string>xlsx</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>CSV-tekst</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.comma-separated-values-text</string>
+        <string>public.tab-separated-values-text</string>
+      </array>
+      <key>CFBundleTypeExtensions</key><array><string>csv</string><string>tsv</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>Andere werkmap</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.microsoft.excel.xls</string>
+        <string>org.openxmlformats.spreadsheetml.sheet.macroenabled</string>
+        <string>com.microsoft.excel.sheet.binary.macroenabled</string>
+        <string>org.oasis-open.opendocument.spreadsheet</string>
+      </array>
+      <key>CFBundleTypeExtensions</key><array><string>xls</string><string>xlsm</string><string>xlsb</string><string>ods</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
@@ -59,6 +94,7 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # Ad-hoc signature so Gatekeeper and the hardened runtime accept a local build.
 codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || echo "let op: ondertekenen mislukt, de app werkt lokaal nog wel" >&2
+
 
 echo "$APP"
 if [ "$OPEN" = 1 ]; then

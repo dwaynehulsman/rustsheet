@@ -23,8 +23,28 @@ open dist/Rustsheet.app
 ```
 
 `scripts/bundle.sh` bouwt de release, maakt `Rustsheet.app` met `Info.plist` (bundle-id
-`nl.infodatek.rustsheet`) en icoon, en ondertekent ad hoc zodat hij lokaal zonder gedoe opent.
+`nl.infodatek.rustsheet`, documenttypes voor xlsx en CSV) en icoon, en ondertekent ad hoc zodat hij lokaal zonder gedoe opent.
 Met `--icon` wordt het icoon eerst opnieuw getekend (`tools/icon`, vectorieel op elke maat).
+
+## Installeren
+
+```bash
+scripts/make-dmg.sh               # dist/Rustsheet-<versie>-arm64.dmg, met een kopie in ~/Downloads
+scripts/make-dmg.sh --no-copy     # alleen in dist/
+scripts/make-dmg.sh --out <map>   # kopie naar een andere map
+```
+
+De DMG bevat `Rustsheet.app` en een snelkoppeling naar Programma's: openen en de app erop
+slepen. App en DMG zijn ad hoc ondertekend (`codesign -s -`); een lokaal gebouwde DMG heeft geen
+quarantaine-vlag, dus de app opent zonder Gatekeeper-melding. Gedownload van elders moet je de
+eerste keer rechtsklikken en Open kiezen. De build is voor Apple silicon (arm64).
+
+Rustsheet meldt zich bij macOS als editor voor Excel-werkmappen (`.xlsx`, UTI
+`org.openxmlformats.spreadsheetml.sheet`) en CSV, en als viewer voor `.xls`, `.xlsm`, `.xlsb` en
+`.ods`. Daardoor staat hij in Finder onder "Open met", en een dubbelklik, het bestand op het
+Dock-icoon slepen of `open -a Rustsheet map.xlsx` laadt het bestand echt, ook als Rustsheet al
+draait. Een leeg, onaangeroerd venster wordt daarvoor hergebruikt, anders komt er een nieuw
+venster.
 
 ## Wat er kan
 

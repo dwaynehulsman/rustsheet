@@ -193,6 +193,20 @@ bij wijzigingen. Het hoofdvenster kan in eframe niet los sluiten zolang er ander
 het het volgende document over en sluit dat venster. Grote bestanden worden op een
 achtergrondthread gelezen, zodat vensters blijven reageren.
 
+### Bestanden openen vanuit Finder
+
+Een dubbelklik in Finder, "Open met" of `open -a Rustsheet map.xlsx` komt binnen als Apple Event,
+dat AppKit doorgeeft aan `application:openURLs:` van de app-delegate. winit 0.30 registreert zelf
+een delegate en paniekt als die wordt vervangen, maar die klasse kent `application:openURLs:`
+niet. Daarom voegt Rustsheet die methode via de Objective-C-runtime toe aan winit's
+delegate-klasse (`open_files.rs`). Dat moet na het aanmaken van de event loop gebeuren (dan
+bestaat de klasse) en voordat die loopt, anders mist een app die met een document wordt
+gestart dat document. Daarom bezit `main` de event loop zelf (`eframe::create_native`) in plaats
+van `eframe::run_native`. De paden gaan in een wachtrij die de app elk frame leegt; een
+wachtende UI wordt gewekt. In `Info.plist` staan de documenttypes met de systeem-UTI's, met
+`LSHandlerRank` Default voor xlsx en Alternate voor de rest, zodat Rustsheet geen bestaande
+standaardkeuze van de gebruiker overneemt.
+
 ### Testen
 
 `egui_kittest` draait de echte weergave zonder scherm en stuurt toets- en muisgebeurtenissen.

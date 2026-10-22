@@ -3051,11 +3051,14 @@ dependencies = [
  "egui",
  "egui_kittest",
  "muda",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
  "png",
  "rfd",
  "rustsheet-core",
  "serde",
  "serde_json",
+ "winit",
 ]
 
 [[package]]
