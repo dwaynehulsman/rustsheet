@@ -362,6 +362,28 @@ impl SheetView {
                 self.sel = Selection::span(CellRef::default(), CellRef::new(MAX_ROWS - 1, MAX_COLS - 1));
             }
             Command::Delete => self.clear_selection(),
+            Command::FillDown | Command::FillRight => {
+                // Copy the first row (or column) of the selection into the rest.
+                let r = self.sel.range();
+                let down = command == Command::FillDown;
+                let (source, target) = if down && r.rows() > 1 {
+                    (
+                        Range::new(r.start, CellRef::new(r.start.row, r.end.col)),
+                        Range::new(CellRef::new(r.start.row + 1, r.start.col), r.end),
+                    )
+                } else if !down && r.cols() > 1 {
+                    (
+                        Range::new(r.start, CellRef::new(r.end.row, r.start.col)),
+                        Range::new(CellRef::new(r.start.row, r.start.col + 1), r.end),
+                    )
+                } else {
+                    return;
+                };
+                if target.len() <= MAX_FORMAT_CELLS {
+                    let changes = rustsheet_core::fill::fill(self.sheet(), source, target, false);
+                    self.doc.set_cells(self.sheet, changes, Some(r));
+                }
+            }
             Command::InsertRows | Command::InsertCols | Command::DeleteRows | Command::DeleteCols => {
                 self.change_lines(command)
             }
@@ -579,6 +601,19 @@ impl SheetView {
             })
             .collect();
         self.doc.set_cells(self.sheet, changes, Some(self.sel.range()));
+    }
+
+    /// Fills `target` from the selection (the fill handle) and selects both.
+    pub fn fill_into(&mut self, target: Range, series: bool) {
+        let source = self.sel.range();
+        if target.len() > MAX_FORMAT_CELLS {
+            self.status = Some("Dat gebied is te groot om te vullen.".into());
+            return;
+        }
+        let changes = rustsheet_core::fill::fill(self.sheet(), source, target, series);
+        self.doc.set_cells(self.sheet, changes, Some(source));
+        let all = source.union(&target);
+        self.sel = Selection { active: self.sel.active, anchor: all.start, corner: all.end };
     }
 
     /// Rows (or columns) the selection covers; a selection spanning every

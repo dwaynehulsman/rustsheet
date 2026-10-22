@@ -93,6 +93,10 @@ pub enum Drag {
     ScrollH {
         grab: f32,
     },
+    /// Dragging the fill handle; `target` is the area that will be filled.
+    Fill {
+        target: Option<Range>,
+    },
 }
 
 /// Screen layout of the visible part of the grid for one frame.
@@ -114,6 +118,8 @@ struct Geometry {
 
 enum Zone {
     Corner,
+    /// The small square at the bottom right of the selection.
+    FillHandle,
     ColBorder(u32),
     ColHeader(u32),
     RowHeader(u32),
@@ -127,6 +133,12 @@ impl SheetView {
         let last = ((self.scroll.1 / f64::from(ROW_H)) as u32 + 80).min(MAX_ROWS);
         let digits = last.to_string().len() as f32;
         (digits * 7.6 + 16.0).max(40.0)
+    }
+
+    /// Screen centre of the fill handle as laid out last frame.
+    #[cfg(test)]
+    pub fn fill_handle_center(&self) -> Option<Pos2> {
+        self.fill_handle(&self.geometry(self.grid_rect)).map(|r| r.center())
     }
 
     /// Screen centre of a cell as laid out last frame.
@@ -263,7 +275,21 @@ impl SheetView {
         if g.hbar.contains(pos) {
             return Some(Zone::HBar);
         }
+        if self.fill_handle(g).is_some_and(|h| h.expand(3.0).contains(pos)) {
+            return Some(Zone::FillHandle);
+        }
         g.cells.contains(pos).then(|| Zone::Cell(self.cell_at(g, pos)))
+    }
+
+    /// Where the fill handle is drawn, when the selection's corner is visible.
+    fn fill_handle(&self, g: &Geometry) -> Option<Rect> {
+        let sel = self.sel.range();
+        if sel.rows() == MAX_ROWS || sel.cols() == MAX_COLS || self.edit.is_some() {
+            return None;
+        }
+        let corner = self.range_rect(g, sel).right_bottom();
+        let rect = Rect::from_center_size(corner - vec2(1.0, 1.0), vec2(7.0, 7.0));
+        g.cells.contains(corner - vec2(2.0, 2.0)).then_some(rect)
     }
 
     /// Thumb rectangle and the scroll range it maps to.
@@ -419,6 +445,9 @@ impl SheetView {
             (Drag::Resize { .. }, _) | (Drag::None, Some(Zone::ColBorder(_))) => {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal)
             }
+            (Drag::None, Some(Zone::FillHandle)) | (Drag::Fill { .. }, _) => {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair)
+            }
             (Drag::None, Some(Zone::Cell(_))) | (Drag::Cells, _) => {
                 ui.ctx().set_cursor_icon(CursorIcon::Cell)
             }
@@ -470,6 +499,10 @@ impl SheetView {
             }
             if self.drag == Drag::Point {
                 self.end_point();
+            }
+            if let Drag::Fill { target: Some(target) } = self.drag {
+                let copy_only = ui.input(|i| i.modifiers.alt);
+                self.fill_into(target, !copy_only);
             }
             self.drag = Drag::None;
         }
@@ -599,6 +632,7 @@ impl SheetView {
                 self.drag = Drag::Cells;
                 env.clip.cut();
             }
+            Zone::FillHandle => self.drag = Drag::Fill { target: None },
             Zone::VBar | Zone::HBar => {
                 let vertical = matches!(zone, Zone::VBar);
                 let (thumb, range) = self.thumb(g, vertical);
@@ -640,7 +674,8 @@ impl SheetView {
                 0.0
             }
         };
-        let selecting = matches!(self.drag, Drag::Cells | Drag::Point | Drag::Cols | Drag::Rows);
+        let selecting =
+            matches!(self.drag, Drag::Cells | Drag::Point | Drag::Cols | Drag::Rows | Drag::Fill { .. });
         if selecting {
             self.scroll.0 += auto(pos.x, g.cells.left(), g.cells.right()) * 0.5;
             self.scroll.1 += auto(pos.y, g.cells.top(), g.cells.bottom()) * 0.5;
@@ -672,6 +707,28 @@ impl SheetView {
                 let (thumb, range) = self.thumb(g, false);
                 let frac = (pos.x - grab - g.hbar.left()) / (g.hbar.width() - thumb.width()).max(1.0);
                 self.scroll.0 = f64::from(frac.clamp(0.0, 1.0)) * range;
+            }
+            Drag::Fill { .. } => {
+                // Grow along whichever axis the pointer left the selection furthest.
+                let sel = self.sel.range();
+                let below = i64::from(at.row) - i64::from(sel.end.row);
+                let above = i64::from(sel.start.row) - i64::from(at.row);
+                let right = i64::from(at.col) - i64::from(sel.end.col);
+                let left = i64::from(sel.start.col) - i64::from(at.col);
+                let best = below.max(above).max(right).max(left);
+                let extended = if best <= 0 {
+                    None
+                } else if best == below {
+                    Some(Range::new(sel.start, CellRef::new(at.row, sel.end.col)))
+                } else if best == above {
+                    Some(Range::new(CellRef::new(at.row, sel.start.col), sel.end))
+                } else if best == right {
+                    Some(Range::new(sel.start, CellRef::new(sel.end.row, at.col)))
+                } else {
+                    Some(Range::new(CellRef::new(sel.start.row, at.col), sel.end))
+                };
+                self.drag =
+                    Drag::Fill { target: extended.and_then(|e| rustsheet_core::fill::fill_target(sel, e)) };
             }
             Drag::None => {}
         }
@@ -811,6 +868,17 @@ impl SheetView {
         if sel.len() > 1 {
             let active = self.range_rect(g, Range::single(self.sel.active));
             cells_painter.rect_stroke(active, 0.0, Stroke::new(1.0, p.accent), StrokeKind::Inside);
+        }
+
+        // Fill handle, and the area a fill drag will cover.
+        if let Some(handle) = self.fill_handle(g) {
+            cells_painter.rect_filled(handle, 1.0, p.accent);
+            cells_painter.rect_stroke(handle, 1.0, Stroke::new(1.0, p.background), StrokeKind::Outside);
+        }
+        if let Drag::Fill { target: Some(target) } = self.drag {
+            let r = self.range_rect(g, sel.union(&target)).shrink(1.0);
+            let path = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            cells_painter.extend(Shape::dashed_line(&path, Stroke::new(1.5, p.accent), 3.0, 3.0));
         }
 
         // Marching border around a pending cut or copy source.

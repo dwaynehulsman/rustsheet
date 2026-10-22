@@ -102,6 +102,14 @@ impl Range {
             .flat_map(move |row| (r.start.col..=r.end.col).map(move |col| CellRef::new(row, col)))
     }
 
+    /// The smallest range covering both.
+    pub fn union(&self, other: &Range) -> Range {
+        Range {
+            start: CellRef::new(self.start.row.min(other.start.row), self.start.col.min(other.start.col)),
+            end: CellRef::new(self.end.row.max(other.end.row), self.end.col.max(other.end.col)),
+        }
+    }
+
     pub fn intersect(&self, other: &Range) -> Option<Range> {
         let start = CellRef::new(self.start.row.max(other.start.row), self.start.col.max(other.start.col));
         let end = CellRef::new(self.end.row.min(other.end.row), self.end.col.min(other.end.col));

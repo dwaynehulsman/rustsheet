@@ -7,6 +7,7 @@ pub mod clipboard;
 mod column;
 mod deps;
 pub mod document;
+pub mod fill;
 pub mod format;
 pub mod formula;
 pub mod input;

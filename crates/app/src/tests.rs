@@ -469,3 +469,49 @@ fn context_menu_inserts_and_deletes_rows_and_columns() {
     assert_eq!(h.state().view.sheet().state(c("A4")).content.source(), "=SUM(A1:A3)");
     assert_eq!(shown(&h, "A4"), "6");
 }
+
+fn drag(h: &mut Harness<'_, State>, from: egui::Pos2, to: egui::Pos2) {
+    h.hover_at(from);
+    h.event(Event::PointerButton {
+        pos: from,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    h.step();
+    h.event(Event::PointerMoved(to));
+    h.step();
+    h.event(Event::PointerButton {
+        pos: to,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    h.run();
+}
+
+#[test]
+fn dragging_the_fill_handle_continues_a_series() {
+    let mut h = harness();
+    for v in ["1", "2"] {
+        text(&mut h, v);
+        key(&mut h, Key::Enter);
+    }
+    click(&mut h, "A1", Modifiers::NONE);
+    click(&mut h, "A2", Modifiers::SHIFT);
+    let handle = h.state().view.fill_handle_center().expect("fill handle visible");
+    let to = h.state().view.cell_center(c("A6"));
+    drag(&mut h, handle, to);
+    for (at, v) in [("A3", "3"), ("A4", "4"), ("A5", "5"), ("A6", "6")] {
+        assert_eq!(shown(&h, at), v, "{at}");
+    }
+    assert_eq!(h.state().view.sel.range().to_string(), "A1:A6");
+
+    // Fill Right copies the first column across the selection.
+    click(&mut h, "A1", Modifiers::NONE);
+    click(&mut h, "C2", Modifiers::SHIFT);
+    command(&mut h, Command::FillRight);
+    assert_eq!(shown(&h, "C2"), "2");
+    command(&mut h, Command::Undo);
+    assert_eq!(shown(&h, "C2"), "");
+}

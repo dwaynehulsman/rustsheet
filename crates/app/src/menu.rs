@@ -39,6 +39,8 @@ pub enum Command {
     InsertCols,
     DeleteRows,
     DeleteCols,
+    FillDown,
+    FillRight,
 }
 
 impl Command {
@@ -72,6 +74,8 @@ impl Command {
             Command::InsertCols => "insert-cols".into(),
             Command::DeleteRows => "delete-rows".into(),
             Command::DeleteCols => "delete-cols".into(),
+            Command::FillDown => "fill-down".into(),
+            Command::FillRight => "fill-right".into(),
         }
     }
 
@@ -109,6 +113,8 @@ impl Command {
             Command::InsertCols,
             Command::DeleteRows,
             Command::DeleteCols,
+            Command::FillDown,
+            Command::FillRight,
         ];
         all.into_iter().chain(NumFmt::ALL.into_iter().map(Command::NumFmt)).find(|c| c.id() == id)
     }
@@ -192,6 +198,9 @@ impl AppMenu {
                 &item("Voeg kolommen in", Command::InsertCols, None),
                 &item("Verwijder rijen", Command::DeleteRows, Some("CmdOrCtrl+Minus")),
                 &item("Verwijder kolommen", Command::DeleteCols, None),
+                &PredefinedMenuItem::separator(),
+                &item("Vul omlaag", Command::FillDown, Some("CmdOrCtrl+D")),
+                &item("Vul naar rechts", Command::FillRight, Some("CmdOrCtrl+R")),
             ],
         )
         .expect("edit menu");
