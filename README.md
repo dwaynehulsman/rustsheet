@@ -99,17 +99,17 @@ sluiten, en grote bestanden laden op de achtergrond zodat het venster blijft rea
 Gemeten op een Apple M2 Max (12 kernen, 32 GB), release-build. Het testbestand heeft 100.000
 rijen met 8 kolommen: 800.008 cellen, waarvan 400.000 formules (`=C2*D2`, een lopend totaal
 `=F1+E2` dat een keten van 100.000 cellen vormt, `IF` en `ROUND`). Tijdens het meten draaiden
-er veel andere processen (load average rond 22), dus de wandkloktijden zijn eerder te hoog dan
+er veel andere processen (load average tussen 22 en 44), dus de wandkloktijden zijn eerder te hoog dan
 te laag; daarom staat de CPU-tijd erbij.
 
 | Wat | Wandklok | CPU |
 |---|---|---|
 | Opstarten tot eerste frame (leeg document) | 210 tot 250 ms | |
-| xlsx met 100.000 rijen openen (lezen + alles berekenen) | 1,6 s | 1,3 s (hoofdthread) |
-| Alle 400.000 formules herberekenen | 357 ms | 342 ms |
-| Wijziging bovenaan de keten (100.003 formules opnieuw) | 76 ms | 73 ms |
+| xlsx met 100.000 rijen openen (lezen + alles berekenen) | 1,2 s | 1,0 s (hoofdthread) |
+| Alle 400.000 formules registreren en berekenen | 413 ms | 401 ms |
+| Wijziging bovenaan de keten (100.003 formules opnieuw) | 50 ms | 50 ms |
 | Wijziging in de laatste rij (4 formules opnieuw) | < 0,1 ms | < 0,1 ms |
-| xlsx met 100.000 rijen bewaren | 1,5 s | 1,2 s |
+| xlsx met 100.000 rijen bewaren | 1,0 s | 0,84 s |
 
 Scrollen door datzelfde bestand, 1.200 frames (eerst vloeiend zoals met een trackpad, daarna
 grote sprongen zoals met de schuifbalk), CPU-tijd per frame:
