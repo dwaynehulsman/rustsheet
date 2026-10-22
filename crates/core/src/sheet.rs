@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::addr::{CellRef, MAX_COLS, Range};
+use crate::column::Column;
 use crate::deps::DepGraph;
 use crate::format::{CellFormat, format_value};
 use crate::formula::{CellSource, Precedent, evaluate};
@@ -41,9 +42,9 @@ static EMPTY: Value = Value::Empty;
 #[derive(Debug, Default)]
 pub struct Sheet {
     name: String,
-    /// One ordered map per column, keyed by row, so ranges iterate only the
+    /// One paged column per sheet column, so ranges iterate only the
     /// cells that exist.
-    columns: Vec<BTreeMap<u32, Cell>>,
+    columns: Vec<Column>,
     deps: DepGraph,
     col_widths: BTreeMap<u32, f32>,
     /// Formulas evaluated by the most recent recalculation.
@@ -64,7 +65,7 @@ impl Sheet {
     }
 
     pub fn cell(&self, at: CellRef) -> Option<&Cell> {
-        self.columns.get(at.col as usize)?.get(&at.row)
+        self.columns.get(at.col as usize)?.get(at.row)
     }
 
     pub fn value(&self, at: CellRef) -> &Value {
@@ -95,7 +96,7 @@ impl Sheet {
     }
 
     pub fn cell_count(&self) -> usize {
-        self.columns.iter().map(BTreeMap::len).sum()
+        self.columns.iter().map(Column::len).sum()
     }
 
     /// Iterates existing cells inside `range`, column by column.
@@ -108,7 +109,7 @@ impl Sheet {
         };
         cols.iter().enumerate().flat_map(move |(i, col)| {
             let c = range.start.col + i as u32;
-            col.range(range.start.row..=range.end.row).map(move |(&r, cell)| (CellRef::new(r, c), cell))
+            col.range(range.start.row, range.end.row).map(move |(r, cell)| (CellRef::new(r, c), cell))
         })
     }
 
@@ -117,14 +118,14 @@ impl Sheet {
         self.columns
             .iter()
             .enumerate()
-            .flat_map(|(c, col)| col.iter().map(move |(&r, cell)| (CellRef::new(r, c as u32), cell)))
+            .flat_map(|(c, col)| col.iter().map(move |(r, cell)| (CellRef::new(r, c as u32), cell)))
     }
 
     /// The smallest range holding every non-default cell.
     pub fn used_range(&self) -> Option<Range> {
         let mut bounds: Option<(u32, u32, u32, u32)> = None;
         for (c, col) in self.columns.iter().enumerate() {
-            let (Some((&first, _)), Some((&last, _))) = (col.first_key_value(), col.last_key_value()) else {
+            let (Some(first), Some(last)) = (col.first_row(), col.last_row()) else {
                 continue;
             };
             let c = c as u32;
@@ -215,12 +216,12 @@ impl Sheet {
         }
         if state.is_default() {
             if let Some(column) = self.columns.get_mut(col) {
-                column.remove(&at.row);
+                column.remove(at.row);
             }
             return;
         }
         if self.columns.len() <= col {
-            self.columns.resize_with(col + 1, BTreeMap::new);
+            self.columns.resize_with(col + 1, Column::default);
         }
         let value = match &state.content {
             Content::Value(v) => v.clone(),
@@ -233,7 +234,7 @@ impl Sheet {
     /// Stores a computed value for a formula cell, e.g. a cached result read
     /// from a file, without recalculating.
     pub fn put_value(&mut self, at: CellRef, value: Value) {
-        if let Some(cell) = self.columns.get_mut(at.col as usize).and_then(|c| c.get_mut(&at.row)) {
+        if let Some(cell) = self.columns.get_mut(at.col as usize).and_then(|c| c.get_mut(at.row)) {
             cell.value = value;
         }
     }

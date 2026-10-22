@@ -1,0 +1,17 @@
+[package]
+name = "rustsheet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Native macOS-spreadsheet in Rust"
+
+[dependencies]
+arboard = "3.7.0"
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
+egui = { version = "0.37.0", default-features = false }
+muda = "0.21.2"
+rfd = "0.17.2"
+rustsheet-core = { path = "../core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

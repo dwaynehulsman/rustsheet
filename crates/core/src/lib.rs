@@ -4,6 +4,7 @@
 
 pub mod addr;
 pub mod clipboard;
+mod column;
 mod deps;
 pub mod document;
 pub mod format;

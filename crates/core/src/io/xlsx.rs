@@ -59,9 +59,20 @@ pub fn read_workbook(path: &Path) -> Result<Sheet, IoError> {
         .first()
         .cloned()
         .ok_or_else(|| IoError::Format("de werkmap bevat geen werkbladen".into()))?;
-    let values = workbook.worksheet_range(&name).map_err(format_err)?;
-    let formulas = workbook.worksheet_formula(&name).map_err(format_err)?;
-    let styles = File::open(path).map(|f| read_sheet_styles(f, 0)).unwrap_or_default();
+    // Values, formulas and styles each need a pass over the sheet XML; run
+    // them side by side, each with its own reader.
+    let (values, formulas, styles) = std::thread::scope(|s| {
+        let formulas = s.spawn(|| {
+            let mut workbook = open_workbook_auto(path).map_err(format_err)?;
+            workbook.worksheet_formula(&name).map_err(format_err)
+        });
+        let styles = s.spawn(|| File::open(path).map(|f| read_sheet_styles(f, 0)).unwrap_or_default());
+        let values = workbook.worksheet_range(&name).map_err(format_err);
+        let formulas =
+            formulas.join().unwrap_or_else(|_| Err(IoError::Format("formules lezen mislukt".into())));
+        (values, formulas, styles.join().unwrap_or_default())
+    });
+    let (values, formulas) = (values?, formulas?);
 
     let mut sheet = Sheet::new(name);
     let mut formats: HashMap<CellRef, CellFormat> = styles.cells.into_iter().collect();
@@ -154,8 +165,23 @@ pub fn write_xlsx_bytes(sheet: &Sheet) -> Result<Vec<u8>, IoError> {
     ws.set_name(valid_sheet_name(sheet.name()).unwrap_or("Blad1")).map_err(xlsx_err)?;
     let mut formats: HashMap<CellFormat, Format> = HashMap::new();
     for (at, cell) in sheet.cells() {
-        let format = formats.entry(cell.format).or_insert_with(|| xlsx_format(&cell.format));
         let (row, col) = (at.row, at.col as u16);
+        // Unformatted cells skip the format entirely; looking up a format in
+        // rust_xlsxwriter hashes it, which dominates large saves.
+        if cell.format.is_default() {
+            match &cell.content {
+                Content::Value(Value::Number(n)) => {
+                    ws.write_number(row, col, *n).map_err(xlsx_err)?;
+                    continue;
+                }
+                Content::Value(Value::Text(s)) => {
+                    ws.write_string(row, col, s).map_err(xlsx_err)?;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let format = formats.entry(cell.format).or_insert_with(|| xlsx_format(&cell.format));
         match &cell.content {
             Content::Empty => {
                 ws.write_blank(row, col, format).map_err(xlsx_err)?;
