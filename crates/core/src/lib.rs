@@ -8,6 +8,7 @@ mod column;
 mod deps;
 pub mod document;
 pub mod fill;
+pub mod filter;
 pub mod find;
 pub mod format;
 pub mod formula;

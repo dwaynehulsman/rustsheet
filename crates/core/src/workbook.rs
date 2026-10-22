@@ -185,6 +185,16 @@ impl Workbook {
         }
     }
 
+    /// Sets or removes a sheet's autofilter; returns the previous one.
+    pub fn set_filter(
+        &mut self,
+        sheet: SheetId,
+        filter: Option<crate::filter::AutoFilter>,
+    ) -> Option<crate::filter::AutoFilter> {
+        let index = self.index_of(sheet)?;
+        self.sheets[index].set_filter(filter)
+    }
+
     /// Sets the frozen rows and columns; returns the previous setting.
     pub fn set_freeze(&mut self, sheet: SheetId, rows: u32, cols: u32) -> (u32, u32) {
         match self.index_of(sheet) {

@@ -9,6 +9,7 @@ use quick_xml::{Reader, XmlVersion};
 use zip::ZipArchive;
 
 use crate::addr::CellRef;
+use crate::filter::AutoFilter;
 use crate::format::{Align, CellFormat, NumFmt, Rgb};
 
 /// Styling found for one worksheet.
@@ -22,6 +23,7 @@ pub struct SheetStyles {
     pub hidden_rows: Vec<u32>,
     /// Frozen (rows, columns).
     pub freeze: (u32, u32),
+    pub filter: Option<AutoFilter>,
 }
 
 fn attr(e: &BytesStart<'_>, name: &str) -> Option<String> {
@@ -221,7 +223,31 @@ pub fn read_styles<R: Read + Seek>(reader: R, names: &[String]) -> Vec<SheetStyl
             let Some(path) = paths.get(name) else { return SheetStyles::default() };
             let Some(part) = read_part(&mut zip, path) else { return SheetStyles::default() };
             let mut styles = SheetStyles::default();
+            // Column of the <filterColumn> being read, relative to the filter.
+            let mut filter_col: Option<u32> = None;
             each_element(part, |e, _| match e.local_name().as_ref() {
+                "autoFilter" => {
+                    let range = attr(e, "ref").and_then(|r| match r.split_once(':') {
+                        Some((a, b)) => Some(crate::addr::Range::new(CellRef::parse(a)?, CellRef::parse(b)?)),
+                        None => CellRef::parse(&r).map(crate::addr::Range::single),
+                    });
+                    styles.filter = range.map(AutoFilter::new);
+                }
+                "filterColumn" => filter_col = attr(e, "colId").and_then(|v| v.parse().ok()),
+                "filters" => {
+                    if let (Some(f), Some(c)) = (styles.filter.as_mut(), filter_col) {
+                        let set = f.criteria.entry(f.range.start.col + c).or_default();
+                        if attr(e, "blank").is_some_and(|v| v == "1" || v == "true") {
+                            set.insert(String::new());
+                        }
+                    }
+                }
+                "filter" => {
+                    if let (Some(f), Some(c), Some(v)) = (styles.filter.as_mut(), filter_col, attr(e, "val"))
+                    {
+                        f.criteria.entry(f.range.start.col + c).or_default().insert(v);
+                    }
+                }
                 "c" => {
                     let Some(style) = attr(e, "s").and_then(|s| s.parse::<usize>().ok()) else { return };
                     let Some(format) = xfs.get(style).copied().filter(|f| !f.is_default()) else { return };

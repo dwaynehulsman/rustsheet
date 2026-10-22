@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::addr::{CellRef, MAX_COLS, MAX_ROWS, Range};
 use crate::column::Column;
+use crate::filter::AutoFilter;
 use crate::format::{CellFormat, format_value};
 use crate::input::Content;
 use crate::value::Value;
@@ -60,6 +61,7 @@ pub struct Sheet {
     row_extra: Vec<(u32, f64)>,
     /// Rows and columns kept in view at the top and left.
     freeze: (u32, u32),
+    filter: Option<AutoFilter>,
 }
 
 impl Sheet {
@@ -168,6 +170,7 @@ impl Sheet {
     /// empty of cells; lines pushed off the grid are dropped (callers check
     /// that first).
     pub(crate) fn shift_lines(&mut self, rows: bool, at: u32, delta: i64) {
+        self.filter = self.filter.take().and_then(|f| f.shifted(rows, at, delta));
         if rows {
             for col in &mut self.columns {
                 col.shift(at, delta, MAX_ROWS);
@@ -300,6 +303,16 @@ impl Sheet {
             r += 1;
         }
         r
+    }
+
+    pub fn filter(&self) -> Option<&AutoFilter> {
+        self.filter.as_ref()
+    }
+
+    /// Sets or removes the autofilter and returns the previous one. Hidden
+    /// rows are not touched; see `Document::set_filter`.
+    pub fn set_filter(&mut self, filter: Option<AutoFilter>) -> Option<AutoFilter> {
+        std::mem::replace(&mut self.filter, filter)
     }
 
     pub fn freeze(&self) -> (u32, u32) {

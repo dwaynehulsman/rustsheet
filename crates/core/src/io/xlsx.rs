@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::Path;
 
 use calamine::{Data, Reader, open_workbook_auto};
-use rust_xlsxwriter::{Color, Format, FormatAlign, Formula, Workbook};
+use rust_xlsxwriter::{Color, FilterCondition, Format, FormatAlign, Formula, Workbook};
 
 use super::IoError;
 use super::styles::{SheetStyles, read_styles};
@@ -160,6 +160,7 @@ fn build_sheet(
         sheet.set_hidden_rows(styles.hidden_rows.into_iter().filter(|&r| r < MAX_ROWS).collect());
     }
     sheet.set_freeze(styles.freeze.0, styles.freeze.1);
+    sheet.set_filter(styles.filter);
     for (col, chars) in styles.col_widths {
         if col < MAX_COLS {
             // The stored width already includes Excel's padding, so at the
@@ -293,6 +294,21 @@ fn write_sheet(
     if fr > 0 || fc > 0 {
         ws.set_freeze_panes(fr, fc as u16).map_err(xlsx_err)?;
     }
+    if let Some(f) = sheet.filter() {
+        let r = f.range;
+        ws.autofilter(r.start.row, r.start.col as u16, r.end.row, r.end.col as u16).map_err(xlsx_err)?;
+        for (&col, allowed) in &f.criteria {
+            let mut condition = FilterCondition::new();
+            for value in allowed {
+                condition = if value.is_empty() {
+                    condition.add_list_blanks_filter()
+                } else {
+                    condition.add_list_filter(value.as_str())
+                };
+            }
+            ws.filter_column(col as u16, &condition).map_err(xlsx_err)?;
+        }
+    }
     Ok(())
 }
 
@@ -347,6 +363,11 @@ mod tests {
         sheet.set_row_height(3, Some(44.0));
         sheet.set_hidden_rows([6].into_iter().collect());
         sheet.set_freeze(1, 1);
+        let mut filter = crate::filter::AutoFilter::new(crate::addr::Range::new(c("A1"), c("B4")));
+        filter
+            .criteria
+            .insert(0, ["Huur".to_string(), "Energie".to_string(), String::new()].into_iter().collect());
+        sheet.set_filter(Some(filter.clone()));
         let mut book = Book::from_sheets(vec![sheet]);
         let mut set = |at: &str, text: &str, format: CellFormat| set(&mut book, 0, at, text, format);
         let bold = CellFormat { bold: true, ..CellFormat::default() };
@@ -385,6 +406,7 @@ mod tests {
         assert!((height - 44.0).abs() < 0.5, "height {height}");
         assert!(back.is_row_hidden(6) && !back.is_row_hidden(5));
         assert_eq!(back.freeze(), (1, 1));
+        assert_eq!(back.filter(), Some(&filter));
     }
 
     #[test]

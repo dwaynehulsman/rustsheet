@@ -16,6 +16,8 @@ pub enum Change {
     HiddenRows(SheetId, std::collections::BTreeSet<u32>),
     /// Frozen rows and columns.
     Freeze(SheetId, (u32, u32)),
+    /// The autofilter (without touching hidden rows; pair with `HiddenRows`).
+    Filter(SheetId, Option<crate::filter::AutoFilter>),
     /// Puts a sheet (with its id) back at a position.
     InsertSheet(usize, Box<Sheet>),
     RemoveSheet(SheetId),
@@ -68,6 +70,7 @@ impl Change {
             | Change::RowHeights(sheet, _)
             | Change::HiddenRows(sheet, _)
             | Change::Freeze(sheet, _)
+            | Change::Filter(sheet, _)
             | Change::RenameSheet(sheet, _)
             | Change::Lines { sheet, .. } => Some(Spot { sheet: *sheet, range: None }),
             Change::InsertSheet(_, sheet) => Some(Spot { sheet: sheet.id(), range: None }),
@@ -162,6 +165,7 @@ impl Document {
             Change::HiddenRows(sheet, rows) => {
                 Change::HiddenRows(sheet, self.book.set_hidden_rows(sheet, rows))
             }
+            Change::Filter(sheet, filter) => Change::Filter(sheet, self.book.set_filter(sheet, filter)),
             Change::Freeze(sheet, (rows, cols)) => {
                 Change::Freeze(sheet, self.book.set_freeze(sheet, rows, cols))
             }
@@ -242,6 +246,15 @@ impl Document {
             (Some(s), _) => Some(s),
             (None, t) => t,
         }
+    }
+
+    /// Sets, changes or removes the autofilter of a sheet and hides the
+    /// rows it filters out. One undoable step.
+    pub fn set_filter(&mut self, sheet: SheetId, filter: Option<crate::filter::AutoFilter>) {
+        let Some(s) = self.book.sheet_by_id(sheet) else { return };
+        let hidden = filter.as_ref().map(|f| f.hidden_rows(s)).unwrap_or_default();
+        let parts = vec![Change::Filter(sheet, filter), Change::HiddenRows(sheet, hidden)];
+        self.apply(Change::Batch(parts), Some(Spot { sheet, range: None }));
     }
 
     // ----- sheets -----
