@@ -515,3 +515,41 @@ fn dragging_the_fill_handle_continues_a_series() {
     command(&mut h, Command::Undo);
     assert_eq!(shown(&h, "C2"), "");
 }
+
+#[test]
+fn find_and_replace_bar() {
+    let mut h = harness();
+    for v in ["Appel", "Peer", "appeltaart", "=LEN(A1)"] {
+        text(&mut h, v);
+        key(&mut h, Key::Enter);
+    }
+    command(&mut h, Command::Find);
+    assert!(h.state().view.find.is_some());
+    text(&mut h, "appel");
+    key(&mut h, Key::Enter);
+    assert_eq!(h.state().view.sel.active, c("A1"));
+    key(&mut h, Key::Enter);
+    assert_eq!(h.state().view.sel.active, c("A3"));
+    assert_eq!(h.state().view.find.as_ref().unwrap().info, "2 van 2");
+    key_mod(&mut h, Modifiers::SHIFT, Key::Enter);
+    assert_eq!(h.state().view.sel.active, c("A1"));
+
+    // Replace all, then undo as one step.
+    command(&mut h, Command::Replace);
+    h.get_by_label("Vervangtekst").click();
+    h.run();
+    text(&mut h, "Peer");
+    h.get_by_label("Vervang alles").click();
+    h.run();
+    assert_eq!(shown(&h, "A1"), "Peer");
+    assert_eq!(shown(&h, "A3"), "Peertaart");
+    assert_eq!(h.state().view.find.as_ref().unwrap().info, "2 vervangen");
+    command(&mut h, Command::Undo);
+    assert_eq!(shown(&h, "A3"), "appeltaart");
+
+    // Esc in the field closes the bar.
+    h.get_by_label("Zoekterm").click();
+    h.run();
+    key(&mut h, Key::Escape);
+    assert!(h.state().view.find.is_none());
+}

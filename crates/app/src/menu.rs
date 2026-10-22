@@ -41,6 +41,10 @@ pub enum Command {
     DeleteCols,
     FillDown,
     FillRight,
+    Find,
+    FindNext,
+    FindPrev,
+    Replace,
 }
 
 impl Command {
@@ -76,6 +80,10 @@ impl Command {
             Command::DeleteCols => "delete-cols".into(),
             Command::FillDown => "fill-down".into(),
             Command::FillRight => "fill-right".into(),
+            Command::Find => "find".into(),
+            Command::FindNext => "find-next".into(),
+            Command::FindPrev => "find-prev".into(),
+            Command::Replace => "replace".into(),
         }
     }
 
@@ -115,6 +123,10 @@ impl Command {
             Command::DeleteCols,
             Command::FillDown,
             Command::FillRight,
+            Command::Find,
+            Command::FindNext,
+            Command::FindPrev,
+            Command::Replace,
         ];
         all.into_iter().chain(NumFmt::ALL.into_iter().map(Command::NumFmt)).find(|c| c.id() == id)
     }
@@ -201,6 +213,11 @@ impl AppMenu {
                 &PredefinedMenuItem::separator(),
                 &item("Vul omlaag", Command::FillDown, Some("CmdOrCtrl+D")),
                 &item("Vul naar rechts", Command::FillRight, Some("CmdOrCtrl+R")),
+                &PredefinedMenuItem::separator(),
+                &item("Zoek…", Command::Find, Some("CmdOrCtrl+F")),
+                &item("Zoek volgende", Command::FindNext, Some("CmdOrCtrl+G")),
+                &item("Zoek vorige", Command::FindPrev, Some("CmdOrCtrl+Shift+G")),
+                &item("Zoek en vervang…", Command::Replace, Some("Alt+CmdOrCtrl+F")),
             ],
         )
         .expect("edit menu");

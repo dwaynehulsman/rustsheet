@@ -74,6 +74,18 @@ pub struct Edit {
     pub point: Option<(usize, CellRef)>,
 }
 
+/// The find (and replace) bar.
+#[derive(Default)]
+pub struct FindBar {
+    pub query: String,
+    pub replacement: String,
+    pub replacing: bool,
+    pub opts: rustsheet_core::find::FindOptions,
+    pub focus_pending: bool,
+    /// "3 van 12" or a result message.
+    pub info: String,
+}
+
 /// A sheet tab being renamed in place.
 pub struct Rename {
     pub sheet: SheetId,
@@ -101,6 +113,7 @@ pub struct SheetView {
     /// switching back to them.
     sheet_views: HashMap<SheetId, (Selection, (f64, f64))>,
     pub rename: Option<Rename>,
+    pub find: Option<FindBar>,
     pub sel: Selection,
     /// Scroll offset in points; f64 because a million rows exceed f32 precision.
     pub scroll: (f64, f64),
@@ -130,6 +143,7 @@ impl SheetView {
             sheet_index: 0,
             sheet_views: HashMap::new(),
             rename: None,
+            find: None,
             sel: Selection::single(CellRef::default()),
             scroll: (0.0, 0.0),
             edit: None,
@@ -254,6 +268,11 @@ impl SheetView {
         egui::Panel::top(("formula-panel", env.window))
             .frame(egui::Frame::new().fill(palette.chrome).inner_margin(egui::Margin::symmetric(8, 4)))
             .show(ui, |ui| self.formula_bar(ui, env));
+        if self.find.is_some() {
+            egui::Panel::top(("find-panel", env.window))
+                .frame(egui::Frame::new().fill(palette.chrome).inner_margin(egui::Margin::symmetric(8, 4)))
+                .show(ui, |ui| self.find_bar(ui, env));
+        }
         egui::Panel::bottom(("status", env.window))
             .frame(egui::Frame::new().fill(palette.chrome).inner_margin(egui::Margin::symmetric(10, 3)))
             .show(ui, |ui| self.status_bar(ui));
@@ -362,6 +381,12 @@ impl SheetView {
                 self.sel = Selection::span(CellRef::default(), CellRef::new(MAX_ROWS - 1, MAX_COLS - 1));
             }
             Command::Delete => self.clear_selection(),
+            Command::Find | Command::Replace => {
+                let bar = self.find.get_or_insert_with(FindBar::default);
+                bar.replacing |= command == Command::Replace;
+                bar.focus_pending = true;
+            }
+            Command::FindNext | Command::FindPrev => self.find_step(command == Command::FindPrev),
             Command::FillDown | Command::FillRight => {
                 // Copy the first row (or column) of the selection into the rest.
                 let r = self.sel.range();
@@ -601,6 +626,141 @@ impl SheetView {
             })
             .collect();
         self.doc.set_cells(self.sheet, changes, Some(self.sel.range()));
+    }
+
+    /// Selects the next (or previous) match of the find bar's query.
+    pub fn find_step(&mut self, backwards: bool) {
+        let Some(bar) = &self.find else { return };
+        if bar.query.is_empty() {
+            return;
+        }
+        let (query, opts) = (bar.query.clone(), bar.opts);
+        let all = rustsheet_core::find::find_all(self.sheet(), &query, opts);
+        let next = rustsheet_core::find::find_next(self.sheet(), &query, opts, self.sel.active, backwards);
+        let info = match next {
+            Some(at) => {
+                let i = all.iter().position(|&a| a == at).map_or(0, |i| i + 1);
+                self.sel = Selection::single(at);
+                self.scroll_into_view = true;
+                format!("{i} van {}", all.len())
+            }
+            None => "Niet gevonden".to_string(),
+        };
+        if let Some(bar) = &mut self.find {
+            bar.info = info;
+        }
+    }
+
+    /// Replaces in the active cell if it matches, then moves on.
+    pub fn replace_one(&mut self) {
+        let Some(bar) = &self.find else { return };
+        let (query, with, opts) = (bar.query.clone(), bar.replacement.clone(), bar.opts);
+        let at = self.sel.active;
+        let changes = rustsheet_core::find::replace(self.sheet(), &[at], &query, &with, opts);
+        if !changes.is_empty() {
+            self.doc.set_cells(self.sheet, changes, Some(Range::single(at)));
+        }
+        self.find_step(false);
+    }
+
+    /// Replaces every match on the sheet as one undoable step.
+    pub fn replace_all(&mut self) {
+        let Some(bar) = &self.find else { return };
+        let (query, with, opts) = (bar.query.clone(), bar.replacement.clone(), bar.opts);
+        let all = rustsheet_core::find::find_all(self.sheet(), &query, opts);
+        let changes = rustsheet_core::find::replace(self.sheet(), &all, &query, &with, opts);
+        let n = changes.len();
+        if n > 0 {
+            self.doc.set_cells(self.sheet, changes, Some(self.sel.range()));
+        }
+        if let Some(bar) = &mut self.find {
+            bar.info = if n == 1 { "1 vervangen".into() } else { format!("{n} vervangen") };
+        }
+    }
+
+    fn find_bar(&mut self, ui: &mut Ui, env: &mut Env<'_>) {
+        let field_id = egui::Id::unique(("find-field", env.window));
+        let replace_id = egui::Id::unique(("replace-field", env.window));
+        let mut action: Option<&str> = None;
+        let focus_field = ui.memory(|m| m.has_focus(field_id) || m.has_focus(replace_id));
+        if focus_field {
+            if take_key(ui, Key::Escape).is_some() {
+                action = Some("close");
+            } else if let Some(m) = take_key(ui, Key::Enter) {
+                let in_replace = ui.memory(|mem| mem.has_focus(replace_id));
+                action = Some(if in_replace {
+                    "replace"
+                } else if m.shift {
+                    "prev"
+                } else {
+                    "next"
+                });
+            }
+        }
+        let Some(bar) = &mut self.find else { return };
+        ui.horizontal(|ui| {
+            ui.label("Zoek");
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut bar.query)
+                    .id(field_id)
+                    .desired_width(180.0)
+                    .event_filter(EDIT_KEYS),
+            );
+            accessible_name(ui, &field, "Zoekterm");
+            if bar.focus_pending {
+                field.request_focus();
+                bar.focus_pending = false;
+            }
+            if field.changed() {
+                bar.info.clear();
+            }
+            if ui.button("Vorige").clicked() {
+                action = Some("prev");
+            }
+            if ui.button("Volgende").clicked() {
+                action = Some("next");
+            }
+            if bar.replacing {
+                ui.separator();
+                ui.label("Vervang door");
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut bar.replacement)
+                        .id(replace_id)
+                        .desired_width(140.0)
+                        .event_filter(EDIT_KEYS),
+                );
+                accessible_name(ui, &r, "Vervangtekst");
+                if ui.button("Vervang").clicked() {
+                    action = Some("replace");
+                }
+                if ui.button("Vervang alles").clicked() {
+                    action = Some("replace-all");
+                }
+            }
+            ui.separator();
+            ui.checkbox(&mut bar.opts.match_case, "Hoofdletters");
+            ui.checkbox(&mut bar.opts.whole_cell, "Hele cel");
+            ui.checkbox(&mut bar.opts.in_values, "In waarden");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let close = ui.add(egui::Button::new("×").frame(false)).on_hover_text("Sluit (Esc)");
+                accessible_name(ui, &close, "Sluit zoeken");
+                if close.clicked() {
+                    action = Some("close");
+                }
+                ui.weak(&bar.info);
+            });
+        });
+        match action {
+            Some("next") => self.find_step(false),
+            Some("prev") => self.find_step(true),
+            Some("replace") => self.replace_one(),
+            Some("replace-all") => self.replace_all(),
+            Some("close") => {
+                self.find = None;
+                self.grid_focus_pending = true;
+            }
+            _ => {}
+        }
     }
 
     /// Fills `target` from the selection (the fill handle) and selects both.
