@@ -51,13 +51,21 @@ venster.
 **Rooster.** Virtueel getekend: alleen het zichtbare deel wordt opgezocht en getekend, dus de
 grootte van het blad maakt voor het scrollen niet uit. Kolom- en rijkoppen, selecteren met muis
 en pijltjes, bereik uitbreiden met Shift (pijltjes of klikken), hele kolommen of rijen via de
-koppen, alles via het hoekje. Kolombreedte slepen aan de rand van een kop, dubbelklikken op die
-rand past de breedte aan. Tekst loopt door in lege buurcellen, getallen die niet passen worden
-`####`, zoals in Excel.
+koppen, alles via het hoekje. Kolombreedte en rijhoogte slepen aan de rand van een kop;
+dubbelklikken op een kolomrand past de breedte aan, op een rijrand zet het de standaardhoogte
+terug. Tekst loopt door in lege buurcellen, getallen die niet passen worden `####`, zoals in
+Excel. In het menu Weergave zet je de bovenste rij, de eerste kolom of alles boven en links van de
+selectie vast; die blijven staan tijdens het scrollen.
+
+**Rijen en kolommen.** Invoegen en verwijderen via het menu Wijzig (⇧⌘= en ⌘-) of de
+rechtermuisknop op cellen en koppen; het aantal volgt de selectie. Formules op alle bladen
+schuiven mee: bereiken groeien als je erin invoegt en krimpen als je eruit verwijdert,
+verwijzingen naar verwijderde cellen worden `#REF!`. Kolombreedtes, rijhoogtes en filters
+schuiven ook mee, en alles is ongedaan te maken.
 
 **Bewerken.** Typen begint met bewerken, dubbelklik, Enter of F2 bewerkt de bestaande inhoud,
 Esc annuleert. Enter en Tab bevestigen en gaan omlaag of naar rechts (binnen een selectie loopt
-dat rond). Tijdens het typen van een formule voegt klikken (of slepen) op een cel de verwijzing
+dat rond; Enter na een reeks Tabs gaat terug naar de kolom waar je begon). Tijdens het typen van een formule voegt klikken (of slepen) op een cel de verwijzing
 in. De formulebalk toont en bewerkt de actieve cel; het naamvak links springt naar een adres
 (`B20`, `A1:C10`). Klik je tijdens het typen van een formule op een andere tab, dan gaat het
 typen verder in de formulebalk en voegt een klik op een cel `Blad2!A1` in. De statusbalk toont som, gemiddelde en aantal van de selectie.
@@ -69,10 +77,37 @@ en alles staat ook in het menu Blad. Elk blad onthoudt zijn eigen selectie en sc
 Hernoemen past elke formule aan die het blad noemt, op alle bladen. Verwijderen maakt van
 verwijzingen naar dat blad `#REF!`, zoals Excel. Alle bladbewerkingen zijn ongedaan te maken.
 
+**Vullen.** Sleep het blokje rechtsonder de selectie (de vulgreep) omlaag, omhoog of opzij: twee
+of meer getallen worden een reeks, een datum telt per dag door, "Week 1" wordt "Week 2", maand- en
+dagnamen (Nederlands en Engels) lopen rond, formules schuiven mee en de rest wordt herhaald. Met ⌥
+ingedrukt wordt alleen gekopieerd. ⌘D en ⌘R vullen omlaag en naar rechts.
+
+**Zoeken en vervangen.** ⌘F opent de zoekbalk, Enter en ⇧Enter (of ⌘G en ⇧⌘G) gaan naar de
+volgende en vorige treffer, ⌥⌘F voegt vervangen toe. Opties: hoofdletters, hele cel, zoeken in
+waarden in plaats van formules. Alles vervangen is één stap om ongedaan te maken.
+
+**Sorteren en filteren.** Menu Data (en de rechtermuisknop): sorteer oplopend of aflopend op de
+kolom van de actieve cel. Staat er één cel geselecteerd, dan wordt het aaneengesloten blok
+gesorteerd; een koprij wordt herkend en blijft staan. Formules gaan mee met hun rij. Filter
+(⇧⌘L) zet knopjes in de koprij; per kolom kies je met vinkjes welke waarden zichtbaar blijven,
+en vanuit die lijst kun je ook sorteren.
+
 **Formules.** Getallen, tekst, `=A1+B2`, `+ - * / ^ & %`, vergelijkingen, haakjes, bereiken
 `A1:B10`, hele kolommen `A:A` en rijen `3:5`, `$`-verwijzingen, verwijzingen naar andere bladen
-(`Blad2!A1`, `'Mijn kosten'!B2:B9`, met aanhalingstekens bij spaties). Functies: SUM, AVERAGE, MIN,
-MAX, COUNT, COUNTA, IF, IFERROR, ROUND, CONCAT, CONCATENATE, AND, OR, NOT, ABS, LEN, UPPER, LOWER.
+(`Blad2!A1`, `'Mijn kosten'!B2:B9`, met aanhalingstekens bij spaties), en weggelaten argumenten
+(`XLOOKUP(x,a,b,,0,-1)`). 66 functies:
+
+- zoeken: VLOOKUP, HLOOKUP, XLOOKUP, INDEX, MATCH (exact, gesorteerd, jokertekens `*` en `?`);
+- voorwaardelijk: SUMIF, SUMIFS, COUNTIF, COUNTIFS, AVERAGEIF, AVERAGEIFS, MAXIFS, MINIFS, met
+  criteria als `">=10"`, `"<>"` en `"app*"`;
+- rekenen: SUM, AVERAGE, MIN, MAX, MEDIAN, COUNT, COUNTA, COUNTBLANK, SUMPRODUCT, ROUND,
+  ROUNDUP, ROUNDDOWN, INT, MOD, ABS, POWER, SQRT;
+- logica: IF, IFS, IFERROR, IFNA, AND, OR, NOT, ISBLANK, ISNUMBER, ISTEXT, ISERROR, ISNA,
+  ISLOGICAL, NA;
+- tekst: TEXT (Excel-notatiecodes, Nederlandse dag- en maandnamen), CONCAT, CONCATENATE, LEFT,
+  RIGHT, MID, LEN, TRIM, SUBSTITUTE, FIND, SEARCH, REPT, UPPER, LOWER, VALUE;
+- datum: TODAY, NOW (herberekend bij elke wijziging), DATE, YEAR, MONTH, DAY, WEEKDAY.
+
 Argumenten scheiden met `,` of `;`. Alleen cellen die van een wijziging afhangen worden opnieuw
 berekend, ook als die op een ander blad staan. Foutwaarden `#DIV/0!`, `#REF!`, `#NAME?`, `#VALUE!`, `#NUM!` en `#CIRC!` bij een
 kringverwijzing.
@@ -86,8 +121,10 @@ blok wordt ermee gevuld. Knippen verplaatst zonder verwijzingen te verschuiven.
 **Ongedaan maken.** Cmd+Z en Cmd+Shift+Z, ook voor opmaak, plakken en kolombreedtes. Tijdens het
 bewerken van een cel gelden ze voor de tekst. Delete of Backspace wist de inhoud van de selectie.
 
-**Opmaak.** Getal, valuta, percentage en datum, vet, links/midden/rechts uitlijnen. Typen van
-`12%`, `€ 5`, `1,234.50` of `22-10-2026` zet de bijpassende notatie.
+**Opmaak.** Getal, valuta, percentage en datum, vet, cursief, tekstkleur en opvulkleur (de
+standaardkleuren van Excel), links/midden/rechts uitlijnen. Typen van `12%`, `€ 5`, `1,234.50`
+of `22-10-2026` zet de bijpassende notatie. Alles wordt in xlsx bewaard en teruggelezen, net als
+kolombreedtes, rijhoogtes, vastgezette rijen en kolommen en filters.
 
 **Bestanden.** Openen en bewaren als `.xlsx` met alle bladen (lezen met calamine plus een eigen
 stijllezer, zodat vet, uitlijning, getalnotatie en kolombreedtes behouden blijven; schrijven met
@@ -95,6 +132,17 @@ rust_xlsxwriter) en `.csv` (`,`, `;` of tab wordt herkend; CSV kent geen bladen,
 CSV schrijft het getoonde blad). Ook `.xls`, `.xlsm`, `.xlsb` en `.ods` kunnen worden
 geopend. Een venster per document, Open recent in het Archief-menu, een vraag om te bewaren bij
 sluiten, en grote bestanden laden op de achtergrond zodat het venster blijft reageren.
+Bestanden kun je ook naar een venster slepen (het venster licht op; bij een onbekend formaat
+volgt een melding) of op het Dock-icoon of de app in Finder laten vallen. Een leeg venster
+wordt hergebruikt, anders opent het bestand in een nieuw venster, dus onbewaard werk wordt
+nooit vervangen. CSV en TSV: komma, puntkomma of tab wordt herkend (`.tsv` is altijd tab),
+UTF-8 met of zonder BOM, en anders Windows-1252.
+
+**Exporteren en afdrukken.** Archief > Exporteer als PDF of CSV, en Druk af (⌘P), dat de PDF in
+Voorvertoning opent om af te drukken. De PDF gebruikt de selectie als die meer dan één cel is,
+anders het hele blad; pagina's worden over A4 verdeeld (liggend als dat past), vastgezette
+koprijen komen op elke pagina terug, gefilterde rijen blijven weg, en opmaak, kleuren en
+paginanummers staan erop.
 
 ### Sneltoetsen
 
@@ -103,7 +151,12 @@ sluiten, en grote bestanden laden op de achtergrond zodat het venster blijft rea
 | ⌘N, ⌘O, ⌘S, ⇧⌘S, ⌘W, ⌘Q | nieuw, open, bewaar, bewaar als, sluit venster, stop |
 | ⌘Z, ⇧⌘Z | herstel, opnieuw |
 | ⌘X, ⌘C, ⌘V, ⌘A | knip, kopieer, plak, selecteer alles |
-| ⌘B | vet |
+| ⌘B, ⌘I | vet, cursief |
+| ⇧⌘=, ⌘- | rijen invoegen, rijen verwijderen |
+| ⌘D, ⌘R | vul omlaag, vul naar rechts |
+| ⌘F, ⌘G, ⇧⌘G, ⌥⌘F | zoek, volgende, vorige, zoek en vervang |
+| ⇧⌘L | filter aan/uit |
+| ⌘P | druk af |
 | ⇧⌘[, ⇧⌘\\, ⇧⌘] | links, midden, rechts uitlijnen |
 | ⌃⇧0, 1, 3, 4, 5 | standaard, getal, datum, valuta, percentage |
 | ⇧F11 | nieuw blad |
@@ -167,11 +220,15 @@ geraakte cellen herberekenen (met exacte aantallen), een keten van 100.000 celle
 relatieve verwijzingen, tab-gescheiden tekst, ongedaan maken, lezen en schrijven van xlsx (met
 meerdere bladen) en CSV, en verwijzingen tussen bladen: herberekening over bladen heen, kringen
 via drie bladen, ontbrekende bladen, hernoemen (formules volgen, ook met aanhalingstekens) en
-verwijderen met ongedaan maken. De interactietests sturen echte toets- en muisgebeurtenissen door de weergave: typen,
+verwijderen met ongedaan maken. Verder per functiefamilie (zoeken, voorwaardelijke sommen,
+tekst, datums, rekenen), notatiecodes van TEXT, rijen en kolommen invoegen en verwijderen,
+vulreeksen, zoeken en vervangen, sorteren, filters, rijgeometrie en PDF-export (geldige
+kruisverwijzingstabel, paginering, verborgen rijen). De interactietests sturen echte toets- en muisgebeurtenissen door de weergave: typen,
 Enter/Tab/Esc/F2, Shift- en Cmd-pijltjes, wissen, kopiëren/knippen/plakken, plakken uit een andere
 app, opmaak, formules aanwijzen met de muis (ook op een andere tab), dubbelklikken, kolombreedte
-slepen, en tabs toevoegen, wisselen, hernoemen, dupliceren en verwijderen via de echte knoppen en
-het contextmenu.
+en rijhoogte slepen, tabs toevoegen, wisselen, hernoemen, dupliceren en verwijderen via de echte
+knoppen en het contextmenu, rijen invoegen en verwijderen via de rechtermuisknop, de vulgreep,
+zoeken en vervangen, kleuren uit de werkbalk, sorteren, filteren via de knopjes en vastzetten.
 
 Voor schermafbeeldingen kan de app zichzelf vastleggen zoals de GPU het frame tekende:
 
@@ -183,10 +240,10 @@ dist/Rustsheet.app/Contents/MacOS/rustsheet --screenshot-and-quit tabs.png --she
 
 ## Grenzen
 
-- Bladen verslepen om de volgorde te wijzigen kan nog niet. Grafiekbladen en macrobladen in een
-  xlsx worden overgeslagen.
-- Functies buiten de lijst hierboven geven `#NAME?`, ook in geopende xlsx-bestanden.
-- Rijen of kolommen invoegen en verwijderen, sorteren, filteren, grafieken en voorwaardelijke
-  opmaak zitten er nog niet in.
-- Opmaak van een selectie groter dan 250.000 cellen (bijvoorbeeld een hele kolom) raakt alleen
-  cellen die al bestaan.
+Zie ook `ontbrekend.md` bij de taak. Bewust nog niet:
+
+- grafieken, draaitabellen, voorwaardelijke opmaak en gegevensvalidatie;
+- cellen samenvoegen, opmerkingen, hyperlinks, afbeeldingen, tekstterugloop in een cel;
+- meerdere losse selecties (⌘-klik), tabs verslepen om bladen te ordenen;
+- de volledige Excel-functiebibliotheek en matrixformules; andere functies geven `#NAME?`;
+- printinstellingen (marges, schaal, kop- en voettekst kiezen): afdrukken loopt via een PDF.

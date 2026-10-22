@@ -157,6 +157,40 @@ links/midden/rechts. Typen herkent `12%`, `€ 5`, `1,234.5` en `22-10-2026` en 
 notatie. Datums zijn Excel-serienummers in het 1900-systeem, inclusief de fictieve 29 februari
 1900, zodat ze gelijk lopen met Excel.
 
+### Rijen en kolommen invoegen en verwijderen
+
+Eén ongedaan-maakbare stap bestaat uit: de cellen in verwijderde rijen leegmaken (zodat ongedaan
+maken ze terugzet), de cellen op het blad verschuiven (`Change::Lines`, alleen opslag), en daarna
+alle formules op alle bladen die naar dat blad verwijzen herschrijven op hun nieuwe plek. De
+regels zitten in `Expr::with_lines_moved`: verwijzingen schuiven mee, ook absolute; een bereik
+groeit als je erin invoegt en krimpt als je eruit verwijdert; wat helemaal verwijderd is wordt
+`#REF!`. Kolombreedtes, rijhoogtes, verborgen rijen en het filterbereik schuiven mee.
+
+### Rijgeometrie, vastzetten en filters
+
+Elk blad bewaart afwijkende rijhoogtes en verborgen rijen, met een gesorteerde tabel van de
+cumulatieve afwijking. Zo is de y-positie van een rij een binaire zoekactie (O(log n) in het aantal
+afwijkende rijen), en de rij onder een y-positie een binaire zoekactie daarover. Een filter is een
+bereik met per kolom de toegestane getoonde waarden; toepassen zet de verborgen rijen. Vastzetten
+splitst het rooster in vier vakken: het scrollbare deel begint onder en rechts van de vaste rijen
+en kolommen, en alles wat getekend wordt, wordt bijgesneden tot het vak van zijn rij en kolom, zodat
+gescrollde cellen nooit over de vaste heen vallen.
+
+### Functies
+
+De evaluator kent 66 functies (`formula/eval.rs` en `formula/eval/more.rs`). Voorwaardelijke
+aggregaten lopen alleen langs bestaande cellen, tenzij een criterium ook lege cellen kan raken.
+Zoekfuncties werken op de ijle kolomopslag. TODAY en NOW zijn vluchtig: de werkmap houdt bij welke
+formules ze gebruiken en neemt die bij elke herberekening mee. TEXT gebruikt een eigen formatter
+voor Excel-notatiecodes.
+
+### PDF
+
+`pdf.rs` schrijft zelf een PDF met de standaardletters Helvetica (niets ingebed) en meet tekst
+met de bijbehorende tekenbreedtes, zodat uitlijning klopt in elke viewer. Pagina's worden eerst
+omlaag en dan opzij verdeeld, zoals Excel. Afdrukken opent die PDF in Voorvertoning, waar het
+macOS-afdrukvenster zit.
+
 ## App
 
 ### Rooster

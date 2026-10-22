@@ -4,7 +4,7 @@ members = ["crates/core", "crates/app", "tools/icon"]
 default-members = ["crates/core", "crates/app", "tools/icon"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 authors = ["Dwayne Hulsman <9630519+dwaynehulsman@users.noreply.github.com>"]
